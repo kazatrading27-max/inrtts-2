@@ -87,7 +87,7 @@ class IndexTTS2:
         self.use_torch_compile = use_torch_compile
 
         self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path))
-
+        #self.gpt = torch.compile(self.gpt, mode="reduce-overhead")
         self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
         load_checkpoint(self.gpt, self.gpt_path)
@@ -253,7 +253,6 @@ class IndexTTS2:
 
             count = torch.sum(code == silent_token).item()
             if count > max_consecutive:
-                # code = code.cpu().tolist()
                 ncode_idx = []
                 n = 0
                 for k in range(len_):
@@ -265,8 +264,6 @@ class IndexTTS2:
                     elif code[k] == silent_token and n < 10:
                         ncode_idx.append(k)
                         n += 1
-                    # if (k == 0 and code[k] == 52) or (code[k] == 52 and code[k-1] == 52):
-                    #    n += 1
                 # new code
                 len_ = len(ncode_idx)
                 codes_list.append(code[ncode_idx])
@@ -402,37 +399,26 @@ class IndexTTS2:
         start_time = time.perf_counter()
 
         if use_emo_text or emo_vector is not None:
-            # we're using a text or emotion vector guidance; so we must remove
-            # "emotion reference voice", to ensure we use correct emotion mixing!
             emo_audio_prompt = None
 
         if use_emo_text:
-            # automatically generate emotion vectors from text prompt
             if emo_text is None:
-                emo_text = text  # use main text prompt
+                emo_text = text
             emo_dict = self.qwen_emo.inference(emo_text)
             print(f"detected emotion vectors from text: {emo_dict}")
-            # convert ordered dict to list of vectors; the order is VERY important!
             emo_vector = list(emo_dict.values())
 
         if emo_vector is not None:
-            # we have emotion vectors; they can't be blended via alpha mixing
-            # in the main inference process later, so we must pre-calculate
-            # their new strengths here based on the alpha instead!
             emo_vector_scale = max(0.0, min(1.0, emo_alpha))
             if emo_vector_scale != 1.0:
-                # scale each vector and truncate to 4 decimals (for nicer printing)
                 emo_vector = [int(x * emo_vector_scale * 10000) / 10000 for x in emo_vector]
                 print(f"scaled emotion vectors to {emo_vector_scale}x: {emo_vector}")
 
         if emo_audio_prompt is None:
-            # we are not using any external "emotion reference voice"; use
-            # speaker's voice as the main emotion reference audio.
             emo_audio_prompt = spk_audio_prompt
-            # must always use alpha=1.0 when we don't have an external reference voice
             emo_alpha = 1.0
 
-        # 如果参考音频改变了，才需要重新生成, 提升速度
+        # Cache logic
         if self.cache_spk_cond is None or self.cache_spk_audio_prompt != spk_audio_prompt:
             if self.cache_spk_cond is not None:
                 self.cache_spk_cond = None
@@ -458,8 +444,8 @@ class IndexTTS2:
                                                      num_mel_bins=80,
                                                      dither=0,
                                                      sample_frequency=16000)
-            feat = feat - feat.mean(dim=0, keepdim=True)  # feat2另外一个滤波器能量组特征[922, 80]
-            style = self.campplus_model(feat.unsqueeze(0))  # 参考音频的全局style2[1,192]
+            feat = feat - feat.mean(dim=0, keepdim=True)
+            style = self.campplus_model(feat.unsqueeze(0))
 
             prompt_condition = self.s2mel.models['length_regulator'](S_ref,
                                                                      ylens=ref_target_lengths,
@@ -534,12 +520,17 @@ class IndexTTS2:
         max_mel_tokens = generation_kwargs.pop("max_mel_tokens", 1500)
         sampling_rate = 22050
 
+        # Inject safeguards against AR repetition loops if supported by backend
+        if "no_repeat_ngram_size" not in generation_kwargs:
+            generation_kwargs["no_repeat_ngram_size"] = 3
+        if "early_stopping" not in generation_kwargs:
+            generation_kwargs["early_stopping"] = True
+
         wavs = []
         gpt_gen_time = 0
         gpt_forward_time = 0
         s2mel_time = 0
         bigvgan_time = 0
-        has_warned = False
         silence = None # for stream_return
         for seg_idx, sent in enumerate(segments):
             self._set_gr_progress(0.2 + 0.7 * seg_idx / segments_count,
@@ -550,9 +541,33 @@ class IndexTTS2:
             if verbose:
                 print(text_tokens)
                 print(f"text_tokens shape: {text_tokens.shape}, text_tokens type: {text_tokens.dtype}")
-                # debug tokenizer
                 text_token_syms = self.tokenizer.convert_ids_to_tokens(text_tokens[0].tolist())
                 print("text_token_syms is same as segment tokens", text_token_syms == sent)
+
+            # --- DYNAMIC MAX LENGTH LOGIC ---
+            # ORIGINAL (caused forced mid-generation cutoffs on this Amharic
+            # finetune): estimated_max = (text_tokens.shape[1] * 15) + 200
+            # Confirmed via direct log evidence: a 24-text-token segment got
+            # a 560 mel-token cap and was truncated mid-utterance (this
+            # exact RuntimeWarning fired, codes hit exactly 560/560), while
+            # a 54-text-token segment got a 1010 cap and finished naturally
+            # at only 705/1010. The "15 mel-tokens per text-token + 200
+            # buffer" ratio was evidently tuned for the base model's
+            # training languages (Chinese/English). Amharic's
+            # morphologically dense BPE subword tokenization (a single word
+            # frequently splits into 5-6 tiny pieces) appears to require
+            # materially more mel-frames of audio per text token to
+            # pronounce naturally, so this heuristic silently truncated GPT
+            # generation before it reached its natural end-of-speech token
+            # -- especially on SHORT segments (typical of SRT subtitle
+            # lines), which get the least absolute buffer under this
+            # formula. This was the confirmed root cause of "some segments
+            # perfect, some broken/inconsistent" in SRT batch dubbing.
+            estimated_max = (text_tokens.shape[1] * 25) + 500
+            dynamic_max_mel_tokens = max(100, min(max_mel_tokens, estimated_max))
+            if verbose:
+                print(f"Dynamic max_mel_tokens for this segment: {dynamic_max_mel_tokens} (Text tokens: {text_tokens.shape[1]})")
+            # ---------------------------------
 
             m_start_time = time.perf_counter()
             with torch.no_grad():
@@ -567,7 +582,6 @@ class IndexTTS2:
 
                     if emo_vector is not None:
                         emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
-                        # emovec = emovec_mat
 
                     codes, speech_conditioning_latent = self.gpt.inference_speech(
                         spk_cond_emb,
@@ -584,43 +598,34 @@ class IndexTTS2:
                         length_penalty=length_penalty,
                         num_beams=num_beams,
                         repetition_penalty=repetition_penalty,
-                        max_generate_length=max_mel_tokens,
+                        max_generate_length=dynamic_max_mel_tokens,  # Inject dynamic cap
                         **generation_kwargs
                     )
 
                 gpt_gen_time += time.perf_counter() - m_start_time
-                if not has_warned and (codes[:, -1] != self.stop_mel_token).any():
+                # --- FIX: previously gated by a per-CALL `has_warned` flag,
+                # which permanently suppressed this warning for every
+                # subsequent segment after the first truncation within the
+                # same infer() call (i.e. when one SRT line's text is split
+                # into multiple internal segments by max_text_tokens_per_
+                # segment). Now fires independently for every segment that
+                # is actually truncated, correctly scoped per-segment. ---
+                if codes.shape[-1] >= dynamic_max_mel_tokens:
                     warnings.warn(
-                        f"WARN: generation stopped due to exceeding `max_mel_tokens` ({max_mel_tokens}). "
+                        f"WARN: generation stopped due to exceeding dynamic `max_mel_tokens` ({dynamic_max_mel_tokens}) "
+                        f"on segment {seg_idx + 1}/{segments_count}. "
                         f"Input text tokens: {text_tokens.shape[1]}. "
-                        f"Consider reducing `max_text_tokens_per_segment`({max_text_tokens_per_segment}) or increasing `max_mel_tokens`.",
+                        f"Consider reducing `max_text_tokens_per_segment`({max_text_tokens_per_segment}).",
                         category=RuntimeWarning
                     )
-                    has_warned = True
 
-                code_lens = torch.tensor([codes.shape[-1]], device=codes.device, dtype=codes.dtype)
-                #                 if verbose:
-                #                     print(codes, type(codes))
-                #                     print(f"codes shape: {codes.shape}, codes type: {codes.dtype}")
-                #                     print(f"code len: {code_lens}")
-
-                code_lens = []
-                max_code_len = 0
-                for code in codes:
-                    if self.stop_mel_token not in code:
-                        code_len = len(code)
-                    else:
-                        len_ = (code == self.stop_mel_token).nonzero(as_tuple=False)[0]
-                        code_len = len_[0].item() if len_.numel() > 0 else len(code)
-                    code_lens.append(code_len)
-                    max_code_len = max(max_code_len, code_len)
-                codes = codes[:, :max_code_len]
-                code_lens = torch.LongTensor(code_lens)
-                code_lens = code_lens.to(self.device)
+                # --- APPLY remove_long_silence BEFORE VOCODER ---
+                # This strips dead-air loop tokens (Token 52) before they waste s2mel and BigVGAN compute time.
+                codes, code_lens = self.remove_long_silence(codes, silent_token=52, max_consecutive=15)
                 if verbose:
-                    print(codes, type(codes))
                     print(f"fix codes shape: {codes.shape}, codes type: {codes.dtype}")
                     print(f"code len: {code_lens}")
+                # -----------------------------------------------
 
                 m_start_time = time.perf_counter()
                 use_speed = torch.zeros(spk_cond_emb.size(0)).to(spk_cond_emb.device).long()
@@ -672,8 +677,7 @@ class IndexTTS2:
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
                 if verbose:
                     print(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
-                # wavs.append(wav[:, :-512])
-                wavs.append(wav.cpu())  # to cpu before saving
+                wavs.append(wav.cpu())
                 if stream_return:
                     yield wav.cpu()
                     if silence == None:
@@ -693,10 +697,8 @@ class IndexTTS2:
         print(f">> Generated audio length: {wav_length:.2f} seconds")
         print(f">> RTF: {(end_time - start_time) / wav_length:.4f}")
 
-        # save audio
-        wav = wav.cpu()  # to cpu
+        wav = wav.cpu()
         if output_path:
-            # 直接保存音频到指定路径中
             if os.path.isfile(output_path):
                 os.remove(output_path)
                 print(">> remove old wav file:", output_path)
@@ -710,7 +712,6 @@ class IndexTTS2:
         else:
             if stream_return:
                 return None
-            # 返回以符合Gradio的格式要求
             wav_data = wav.type(torch.int16)
             wav_data = wav_data.numpy().T
             yield (sampling_rate, wav_data)
@@ -740,18 +741,12 @@ class QwenEmotion:
             "悲伤": "sad",
             "恐惧": "afraid",
             "反感": "disgusted",
-            # TODO: the "低落" (melancholic) emotion will always be mapped to
-            # "悲伤" (sad) by QwenEmotion's text analysis. it doesn't know the
-            # difference between those emotions even if user writes exact words.
-            # SEE: `self.melancholic_words` for current workaround.
             "低落": "melancholic",
             "惊讶": "surprised",
             "自然": "calm",
         }
         self.desired_vector_order = ["高兴", "愤怒", "悲伤", "恐惧", "反感", "低落", "惊讶", "自然"]
         self.melancholic_words = {
-            # emotion text phrases that will force QwenEmotion's "悲伤" (sad) detection
-            # to become "低落" (melancholic) instead, to fix limitations mentioned above.
             "低落",
             "melancholy",
             "melancholic",
@@ -766,17 +761,11 @@ class QwenEmotion:
         return max(self.min_score, min(self.max_score, value))
 
     def convert(self, content):
-        # generate emotion vector dictionary:
-        # - insert values in desired order (Python 3.7+ `dict` remembers insertion order)
-        # - convert Chinese keys to English
-        # - clamp all values to the allowed min/max range
-        # - use 0.0 for any values that were missing in `content`
         emotion_dict = {
             self.cn_key_to_en[cn_key]: self.clamp_score(content.get(cn_key, 0.0))
             for cn_key in self.desired_vector_order
         }
 
-        # default to a calm/neutral voice if all emotion vectors were empty
         if all(val <= 0.0 for val in emotion_dict.values()):
             print(">> no emotions detected; using default calm/neutral voice")
             emotion_dict["calm"] = 1.0
@@ -797,7 +786,6 @@ class QwenEmotion:
         )
         model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
 
-        # conduct text completion
         generated_ids = self.model.generate(
             **model_inputs,
             max_new_tokens=32768,
@@ -805,35 +793,24 @@ class QwenEmotion:
         )
         output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
 
-        # parsing thinking content
         try:
-            # rindex finding 151668 (</think>)
             index = len(output_ids) - output_ids[::-1].index(151668)
         except ValueError:
             index = 0
 
         content = self.tokenizer.decode(output_ids[index:], skip_special_tokens=True)
 
-        # decode the JSON emotion detections as a dictionary
         try:
             content = json.loads(content)
         except json.decoder.JSONDecodeError:
-            # invalid JSON; fallback to manual string parsing
-            # print(">> parsing QwenEmotion response", content)
             content = {
                 m.group(1): float(m.group(2))
                 for m in re.finditer(r'([^\s":.,]+?)"?\s*:\s*([\d.]+)', content)
             }
-            # print(">> dict result", content)
 
-        # workaround for QwenEmotion's inability to distinguish "悲伤" (sad) vs "低落" (melancholic).
-        # if we detect any of the IndexTTS "melancholic" words, we swap those vectors
-        # to encode the "sad" emotion as "melancholic" (instead of sadness).
         text_input_lower = text_input.lower()
         if any(word in text_input_lower for word in self.melancholic_words):
-            # print(">> before vec swap", content)
             content["悲伤"], content["低落"] = content.get("低落", 0.0), content.get("悲伤", 0.0)
-            # print(">>  after vec swap", content)
 
         return self.convert(content)
 

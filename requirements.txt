@@ -1,0 +1,78 @@
+# IndexTTS2 Requirements
+# Python >= 3.10, < 3.13 required
+#
+# =============================================================================
+# CUDA VERSION NOTES:
+# =============================================================================
+# Default: CUDA 12.4 (cu124) - Compatible with Lightning AI H100s
+# For CUDA 12.8+: Use --index-url https://download.pytorch.org/whl/cu128
+#
+# Example for cu128:
+#   pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu128
+# =============================================================================
+
+# Core dependencies - PIN NUMPY for compatibility
+numpy==1.26.4
+webrtcvad>=2.0.10
+absl-py>=2.0.0
+
+# ML/AI frameworks (use cu124 by default)
+# For cu128, install torch separately with: --index-url https://download.pytorch.org/whl/cu128
+accelerate>=1.8.1
+torch>=2.5.1
+torchaudio>=2.5.1
+torchvision>=0.20.0
+transformers>=4.43.0
+modelscope>=1.27.0
+safetensors>=0.5.2
+tensorboard>=2.11.0
+huggingface_hub>=0.20.0
+
+# Audio processing
+# NOTE: soundfile is CRITICAL - it's the reliable backend for torchaudio
+soundfile>=0.12.1
+librosa>=0.10.2
+scipy>=1.11.0
+ffmpeg-python>=0.2.0
+pydub>=0.25.1
+
+# NOTE: descript-audiotools conflicts with audio-separator (protobuf versions)
+# Install separately if needed: pip install descript-audiotools
+
+# Text processing - align tokenizers with transformers
+sentencepiece>=0.2.1
+tokenizers>=0.21.0
+g2p-en>=2.1.0
+jieba>=0.42.1
+cn2an>=0.5.22
+textstat>=0.7.10
+
+# WeText (platform-specific)
+wetext>=0.0.9; sys_platform != 'linux'
+WeTextProcessing; sys_platform == 'linux'
+
+# Utilities
+einops>=0.8.1
+omegaconf>=2.3.0
+munch>=4.0.0
+json5>=0.10.0
+tqdm>=4.67.1
+
+# Scientific computing
+numba>=0.60.0
+pandas>=2.0.0
+matplotlib>=3.8.2
+opencv-python>=4.9.0.80
+
+# Build tools
+cython>=3.0.7
+pypdf2>=3.0.1
+
+# Optional: YouTube downloader for dataset creation
+yt-dlp>=2024.1.0
+
+# Optional: Gradio for WebUI
+# gradio>=5.45.0
+
+# Optional: DeepSpeed for distributed training
+# deepspeed>=0.17.1

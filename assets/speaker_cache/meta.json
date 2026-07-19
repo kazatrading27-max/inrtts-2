@@ -1,0 +1,490 @@
+{
+  "spk_3797ee82": {
+    "voice_name": "spk_3797ee82",
+    "audio_path": "assets/speaker_cache/spk_3797ee82.wav",
+    "md5": "3797ee82f548c70fcb4440bda6a65122",
+    "original_filename": "tmpe9xzntbs.wav",
+    "created_at": 1783371375.4576995,
+    "embedding_cached": true
+  },
+  "spk_b6d40dbf": {
+    "voice_name": "spk_b6d40dbf",
+    "audio_path": "assets/speaker_cache/spk_b6d40dbf.wav",
+    "md5": "b6d40dbfa866e1416d39f1356d0cb84e",
+    "original_filename": "tmp31ietj70.wav",
+    "created_at": 1783372200.4897206,
+    "embedding_cached": true
+  },
+  "spk_d81f6e47": {
+    "voice_name": "spk_d81f6e47",
+    "audio_path": "assets/speaker_cache/spk_d81f6e47.wav",
+    "md5": "d81f6e4712ff754da4628e54249da610",
+    "original_filename": "tmpj9v3qcc4.wav",
+    "created_at": 1783373101.8309274,
+    "embedding_cached": true
+  },
+  "spk_858717ae": {
+    "voice_name": "spk_858717ae",
+    "audio_path": "assets/speaker_cache/spk_858717ae.wav",
+    "md5": "858717ae98dbc971fa1ee56775fae89f",
+    "original_filename": "tmpp9dseufs.wav",
+    "created_at": 1783373411.7224612,
+    "embedding_cached": true
+  },
+  "spk_7cbfc442": {
+    "voice_name": "spk_7cbfc442",
+    "audio_path": "assets/speaker_cache/spk_7cbfc442.wav",
+    "md5": "7cbfc4428d57abe8bc10582ee04ff3fb",
+    "original_filename": "tmpjlnec_xo.wav",
+    "created_at": 1783418857.9402413,
+    "embedding_cached": true
+  },
+  "spk_07c14e8b": {
+    "voice_name": "spk_07c14e8b",
+    "audio_path": "assets/speaker_cache/spk_07c14e8b.wav",
+    "md5": "07c14e8b0cff711d64624d811ce1a323",
+    "original_filename": "ref_seg1_1783421073243_0.11_4.27.wav",
+    "created_at": 1783421586.1593163,
+    "embedding_cached": true
+  },
+  "spk_1573ae81": {
+    "voice_name": "spk_1573ae81",
+    "audio_path": "assets/speaker_cache/spk_1573ae81.wav",
+    "md5": "1573ae81a69a6dab6d8e038471201a72",
+    "original_filename": "ref_seg2_1783421073243_4.85_9.59.wav",
+    "created_at": 1783421594.2882676,
+    "embedding_cached": true
+  },
+  "spk_571cd5b4": {
+    "voice_name": "spk_571cd5b4",
+    "audio_path": "assets/speaker_cache/spk_571cd5b4.wav",
+    "md5": "571cd5b4d97d0849704b0e37e5609653",
+    "original_filename": "ref_seg3_1783421073243_10.05_11.61.wav",
+    "created_at": 1783421601.3372462,
+    "embedding_cached": true
+  },
+  "spk_9b65b99a": {
+    "voice_name": "spk_9b65b99a",
+    "audio_path": "assets/speaker_cache/spk_9b65b99a.wav",
+    "md5": "9b65b99ab29b473dee75a8b0dda16bfe",
+    "original_filename": "ref_seg4_1783421073243_12.09_17.25.wav",
+    "created_at": 1783421614.3678257,
+    "embedding_cached": true
+  },
+  "spk_cddf6e20": {
+    "voice_name": "spk_cddf6e20",
+    "audio_path": "assets/speaker_cache/spk_cddf6e20.wav",
+    "md5": "cddf6e2037a313850e2aa5021a6f7e70",
+    "original_filename": "ref_seg5_1783421073243_17.73_21.25.wav",
+    "created_at": 1783421620.150768,
+    "embedding_cached": true
+  },
+  "spk_4e30a610": {
+    "voice_name": "spk_4e30a610",
+    "audio_path": "assets/speaker_cache/spk_4e30a610.wav",
+    "md5": "4e30a610685b4355200b44dda6e65518",
+    "original_filename": "tmp0bgg8jfh.wav",
+    "created_at": 1783421722.0772595,
+    "embedding_cached": true
+  },
+  "spk_079cfb7f": {
+    "voice_name": "spk_079cfb7f",
+    "audio_path": "assets/speaker_cache/spk_079cfb7f.wav",
+    "md5": "079cfb7f51cf302c3f082d44ba3fed14",
+    "original_filename": "ref_seg1_1783607415175_6.99_19.97.wav",
+    "created_at": 1783615026.7867517,
+    "embedding_cached": true
+  },
+  "spk_d5c7c179": {
+    "voice_name": "spk_d5c7c179",
+    "audio_path": "assets/speaker_cache/spk_d5c7c179.wav",
+    "md5": "d5c7c1793c16608fc09e30e23ca9e0de",
+    "original_filename": "ref_seg2_1783607415175_20.55_29.51.wav",
+    "created_at": 1783615036.744779,
+    "embedding_cached": true
+  },
+  "spk_57695b79": {
+    "voice_name": "spk_57695b79",
+    "audio_path": "assets/speaker_cache/spk_57695b79.wav",
+    "md5": "57695b7954976f3e708df339db9c93cd",
+    "original_filename": "ref_seg3_1783607415175_29.51_37.09.wav",
+    "created_at": 1783615046.1780272,
+    "embedding_cached": true
+  },
+  "spk_18fa9339": {
+    "voice_name": "spk_18fa9339",
+    "audio_path": "assets/speaker_cache/spk_18fa9339.wav",
+    "md5": "18fa9339ef61728ba602bf913aab0882",
+    "original_filename": "ref_seg4_1783607415175_37.77_46.21.wav",
+    "created_at": 1783615054.5727549,
+    "embedding_cached": true
+  },
+  "spk_6d715482": {
+    "voice_name": "spk_6d715482",
+    "audio_path": "assets/speaker_cache/spk_6d715482.wav",
+    "md5": "6d715482ad6013dc095c4ed7c37f2620",
+    "original_filename": "tmptut3kz13.wav",
+    "created_at": 1783615309.8331609,
+    "embedding_cached": true
+  },
+  "spk_a6069d32": {
+    "voice_name": "spk_a6069d32",
+    "audio_path": "assets/speaker_cache/spk_a6069d32.wav",
+    "md5": "a6069d327d7853af2675f46d171e3eec",
+    "original_filename": "ref_seg5_1783615190895_47.15_58.27.wav",
+    "created_at": 1783616328.4673612,
+    "embedding_cached": true
+  },
+  "spk_9456d167": {
+    "voice_name": "spk_9456d167",
+    "audio_path": "assets/speaker_cache/spk_9456d167.wav",
+    "md5": "9456d1671473a36a7d192baa58e26e21",
+    "original_filename": "ref_seg6_1783615190895_59.11_68.27.wav",
+    "created_at": 1783616339.1748304,
+    "embedding_cached": true
+  },
+  "spk_f54aa9e2": {
+    "voice_name": "spk_f54aa9e2",
+    "audio_path": "assets/speaker_cache/spk_f54aa9e2.wav",
+    "md5": "f54aa9e243219121eede8fd196fff652",
+    "original_filename": "tmprw4u6gns.wav",
+    "created_at": 1783618526.5051157,
+    "embedding_cached": true
+  },
+  "spk_a3a74a36": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_a3a74a36.wav",
+    "md5": "a3a74a36d69febae0029866f4caa50e9",
+    "original_filename": "inline_base64",
+    "created_at": 1783626909.7839851,
+    "embedding_cached": false
+  },
+  "spk_8ca2915b": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_8ca2915b.wav",
+    "md5": "8ca2915b573af374bea393f21bf3081c",
+    "original_filename": "inline_base64",
+    "created_at": 1784036106.286679,
+    "embedding_cached": false
+  },
+  "spk_8a20036b": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_8a20036b.wav",
+    "md5": "8a20036bf74642211eace8e8b92aa8de",
+    "original_filename": "inline_base64",
+    "created_at": 1784036158.4677489,
+    "embedding_cached": false
+  },
+  "spk_8ca5243d": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_8ca5243d.wav",
+    "md5": "8ca5243d17d11df58bf0e9f3643a99ef",
+    "original_filename": "inline_base64",
+    "created_at": 1784036176.8486693,
+    "embedding_cached": false
+  },
+  "spk_a47679b0": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_a47679b0.wav",
+    "md5": "a47679b0da9b74cce5dbb5f84c983221",
+    "original_filename": "inline_base64",
+    "created_at": 1784036206.6165273,
+    "embedding_cached": false
+  },
+  "spk_94e6af64": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_94e6af64.wav",
+    "md5": "94e6af64bda0f17a4d4be90fb7f0b761",
+    "original_filename": "inline_base64",
+    "created_at": 1784036232.841344,
+    "embedding_cached": false
+  },
+  "spk_7eae43e8": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_7eae43e8.wav",
+    "md5": "7eae43e8b13345800a9bf01daf4cb6e3",
+    "original_filename": "inline_base64",
+    "created_at": 1784036256.5523515,
+    "embedding_cached": false
+  },
+  "spk_aeadda88": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_aeadda88.wav",
+    "md5": "aeadda88f727b8e6ce08001304ebc9d8",
+    "original_filename": "inline_base64",
+    "created_at": 1784036296.3393204,
+    "embedding_cached": false
+  },
+  "spk_6d37de33": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_6d37de33.wav",
+    "md5": "6d37de33b32ba38941d71d86bd934ed1",
+    "original_filename": "inline_base64",
+    "created_at": 1784036338.6397994,
+    "embedding_cached": false
+  },
+  "spk_1262a5dc": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_1262a5dc.wav",
+    "md5": "1262a5dc2866a8f241741312c4988489",
+    "original_filename": "inline_base64",
+    "created_at": 1784036364.8975792,
+    "embedding_cached": false
+  },
+  "spk_4cf171ea": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_4cf171ea.wav",
+    "md5": "4cf171eab429f58f578bff960bf24b37",
+    "original_filename": "inline_base64",
+    "created_at": 1784036387.387739,
+    "embedding_cached": false
+  },
+  "spk_192a26d6": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_192a26d6.wav",
+    "md5": "192a26d6f96c72f4a1e1cb34b906cbdb",
+    "original_filename": "inline_base64",
+    "created_at": 1784036408.9384003,
+    "embedding_cached": false
+  },
+  "spk_6321a341": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_6321a341.wav",
+    "md5": "6321a3418a927bd89fcce9c3287a4108",
+    "original_filename": "inline_base64",
+    "created_at": 1784036430.95745,
+    "embedding_cached": false
+  },
+  "spk_d19645da": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_d19645da.wav",
+    "md5": "d19645dac1625e641706a7349201a459",
+    "original_filename": "inline_base64",
+    "created_at": 1784036452.0424492,
+    "embedding_cached": false
+  },
+  "spk_bece75d0": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_bece75d0.wav",
+    "md5": "bece75d055fce111da89a28479f0bb9c",
+    "original_filename": "inline_base64",
+    "created_at": 1784036473.5802147,
+    "embedding_cached": false
+  },
+  "spk_e7df34ec": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_e7df34ec.wav",
+    "md5": "e7df34ecf657ceace4a85714d7afd421",
+    "original_filename": "inline_base64",
+    "created_at": 1784036494.4432714,
+    "embedding_cached": false
+  },
+  "spk_9d98c0f4": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_9d98c0f4.wav",
+    "md5": "9d98c0f4f85b6faa3510e5e20b3ad011",
+    "original_filename": "inline_base64",
+    "created_at": 1784036513.5982835,
+    "embedding_cached": false
+  },
+  "spk_7aaf6df9": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_7aaf6df9.wav",
+    "md5": "7aaf6df9df0ae949538c7787b35ea0cc",
+    "original_filename": "inline_base64",
+    "created_at": 1784036534.1457698,
+    "embedding_cached": false
+  },
+  "spk_6d39e4c2": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_6d39e4c2.wav",
+    "md5": "6d39e4c2ffd281b1d46c517e82f96bef",
+    "original_filename": "inline_base64",
+    "created_at": 1784036555.2401383,
+    "embedding_cached": false
+  },
+  "spk_51bece2f": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_51bece2f.wav",
+    "md5": "51bece2fb8eecaf277ce23792e830e98",
+    "original_filename": "inline_base64",
+    "created_at": 1784036575.8516767,
+    "embedding_cached": false
+  },
+  "spk_5d32e123": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_5d32e123.wav",
+    "md5": "5d32e12324ffeba399fd6c0f65f33add",
+    "original_filename": "inline_base64",
+    "created_at": 1784036594.5976436,
+    "embedding_cached": false
+  },
+  "spk_2b5495f7": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_2b5495f7.wav",
+    "md5": "2b5495f7e3dfa0b5185ec3328c270b8d",
+    "original_filename": "inline_base64",
+    "created_at": 1784036617.5998223,
+    "embedding_cached": false
+  },
+  "spk_5e920306": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_5e920306.wav",
+    "md5": "5e92030669a38af20cb584ac36151d3a",
+    "original_filename": "inline_base64",
+    "created_at": 1784036639.6323795,
+    "embedding_cached": false
+  },
+  "spk_4cd78ac7": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_4cd78ac7.wav",
+    "md5": "4cd78ac7768180dd01e808dcdc1acade",
+    "original_filename": "inline_base64",
+    "created_at": 1784140778.1345727,
+    "embedding_cached": false
+  },
+  "spk_92d44226": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_92d44226.wav",
+    "md5": "92d44226b6bf32e4061302ba88e25c3e",
+    "original_filename": "inline_base64",
+    "created_at": 1784140837.6896076,
+    "embedding_cached": false
+  },
+  "spk_8f23dc2c": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_8f23dc2c.wav",
+    "md5": "8f23dc2c38b343ea19398295d9ca6a36",
+    "original_filename": "inline_base64",
+    "created_at": 1784140914.6339746,
+    "embedding_cached": false
+  },
+  "spk_f80b03fb": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_f80b03fb.wav",
+    "md5": "f80b03fbe2e00350bb5c21d8afea9363",
+    "original_filename": "inline_base64",
+    "created_at": 1784186995.02194,
+    "embedding_cached": false
+  },
+  "spk_fee2f5db": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_fee2f5db.wav",
+    "md5": "fee2f5db550e55f94be71dc475876761",
+    "original_filename": "inline_base64",
+    "created_at": 1784187188.4351637,
+    "embedding_cached": false
+  },
+  "spk_bbb99b41": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_bbb99b41.wav",
+    "md5": "bbb99b4144fa2f78069d185df5187f58",
+    "original_filename": "inline_base64",
+    "created_at": 1784187650.5301397,
+    "embedding_cached": false
+  },
+  "spk_130d4444": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_130d4444.wav",
+    "md5": "130d44443a8903fe27fa874da4970a47",
+    "original_filename": "inline_base64",
+    "created_at": 1784193284.5817268,
+    "embedding_cached": false
+  },
+  "spk_43ca4849": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_43ca4849.wav",
+    "md5": "43ca4849ec488364bf5866f1da20e983",
+    "original_filename": "inline_base64",
+    "created_at": 1784193471.1769488,
+    "embedding_cached": false
+  },
+  "spk_47e3f195": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_47e3f195.wav",
+    "md5": "47e3f195eb88e47ff3f60df47ac1fdc4",
+    "original_filename": "inline_base64",
+    "created_at": 1784193677.6369076,
+    "embedding_cached": false
+  },
+  "spk_dd6d2fc2": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_dd6d2fc2.wav",
+    "md5": "dd6d2fc23019cf8b43917956bb985ec7",
+    "original_filename": "inline_base64",
+    "created_at": 1784209958.4464645,
+    "embedding_cached": false
+  },
+  "spk_34478f66": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_34478f66.wav",
+    "md5": "34478f66847e4463e4bce3ee7d7da346",
+    "original_filename": "inline_base64",
+    "created_at": 1784210414.4019697,
+    "embedding_cached": false
+  },
+  "spk_d4a03cd5": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_d4a03cd5.wav",
+    "md5": "d4a03cd512ba9be9236d056a033df6c9",
+    "original_filename": "inline_base64",
+    "created_at": 1784219365.879891,
+    "embedding_cached": false
+  },
+  "spk_6a086b4a": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_6a086b4a.wav",
+    "md5": "6a086b4a2eaabef2ecc7bb044aa760ca",
+    "original_filename": "inline_base64",
+    "created_at": 1784297500.1978712,
+    "embedding_cached": false
+  },
+  "spk_c4c69905": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_c4c69905.wav",
+    "md5": "c4c69905cdee22d1f0aea2e0bf8bf0f1",
+    "original_filename": "inline_base64",
+    "created_at": 1784299585.2908452,
+    "embedding_cached": false
+  },
+  "spk_493fe83f": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_493fe83f.wav",
+    "md5": "493fe83ff61d8ac56024699df084fc7b",
+    "original_filename": "inline_base64",
+    "created_at": 1784311821.1975288,
+    "embedding_cached": false
+  },
+  "spk_f6a1048d": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_f6a1048d.wav",
+    "md5": "f6a1048d655e2f24fcb7e829d020ed2f",
+    "original_filename": "inline_base64",
+    "created_at": 1784318368.0438037,
+    "embedding_cached": false
+  },
+  "spk_b2302faa": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_b2302faa.wav",
+    "md5": "b2302faa5e252938a7de89ecbcfc2e8e",
+    "original_filename": "inline_base64",
+    "created_at": 1784318479.6766,
+    "embedding_cached": false
+  },
+  "spk_945d7186": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_945d7186.wav",
+    "md5": "945d7186c2d077a835e7356576d730eb",
+    "original_filename": "inline_base64",
+    "created_at": 1784318770.885762,
+    "embedding_cached": false
+  },
+  "spk_3342c9d2": {
+    "voice_name": "dynamic_base64",
+    "audio_path": "assets/speaker_cache/spk_3342c9d2.wav",
+    "md5": "3342c9d2b6e11f7c18f477852622234d",
+    "original_filename": "inline_base64",
+    "created_at": 1784319675.8967915,
+    "embedding_cached": false
+  }
+}

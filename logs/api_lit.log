@@ -1,0 +1,155 @@
+2026-07-15 17:41:35.583 | INFO     | __main__:<module>:581 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 17:41:35.583 | INFO     | __main__:<module>:582 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 17:41:35.583 | INFO     | __main__:<module>:583 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 17:41:35.583 | INFO     | __main__:<module>:584 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 17:41:35.584 | INFO     | __main__:<module>:585 - FP16: True, workers/device: 1, device: auto
+2026-07-15 17:42:29.736 | INFO     | __main__:<module>:581 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 17:42:29.739 | INFO     | __main__:<module>:582 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 17:42:29.739 | INFO     | __main__:<module>:583 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 17:42:29.740 | INFO     | __main__:<module>:584 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 17:42:29.740 | INFO     | __main__:<module>:585 - FP16: True, workers/device: 1, device: auto
+2026-07-15 17:43:05.739 | INFO     | __main__:<module>:581 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 17:43:05.740 | INFO     | __main__:<module>:582 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 17:43:05.740 | INFO     | __main__:<module>:583 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 17:43:05.740 | INFO     | __main__:<module>:584 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 17:43:05.740 | INFO     | __main__:<module>:585 - FP16: True, workers/device: 1, device: auto
+2026-07-15 17:48:53.411 | INFO     | __main__:<module>:581 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 17:48:53.412 | INFO     | __main__:<module>:582 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 17:48:53.412 | INFO     | __main__:<module>:583 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 17:48:53.413 | INFO     | __main__:<module>:584 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 17:48:53.413 | INFO     | __main__:<module>:585 - FP16: True, workers/device: 1, device: auto
+2026-07-15 17:52:21.639 | INFO     | __main__:<module>:581 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 17:52:21.640 | INFO     | __main__:<module>:582 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 17:52:21.640 | INFO     | __main__:<module>:583 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 17:52:21.641 | INFO     | __main__:<module>:584 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 17:52:21.641 | INFO     | __main__:<module>:585 - FP16: True, workers/device: 1, device: auto
+2026-07-15 17:52:40.366 | INFO     | __main__:<module>:581 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 17:52:40.367 | INFO     | __main__:<module>:582 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 17:52:40.367 | INFO     | __main__:<module>:583 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 17:52:40.367 | INFO     | __main__:<module>:584 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 17:52:40.368 | INFO     | __main__:<module>:585 - FP16: True, workers/device: 1, device: auto
+2026-07-15 17:53:02.910 | INFO     | __main__:<module>:581 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 17:53:02.911 | INFO     | __main__:<module>:582 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 17:53:02.911 | INFO     | __main__:<module>:583 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 17:53:02.912 | INFO     | __main__:<module>:584 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 17:53:02.912 | INFO     | __main__:<module>:585 - FP16: True, workers/device: 1, device: auto
+2026-07-15 17:53:51.906 | INFO     | __main__:<module>:581 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 17:53:51.906 | INFO     | __main__:<module>:582 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 17:53:51.907 | INFO     | __main__:<module>:583 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 17:53:51.907 | INFO     | __main__:<module>:584 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 17:53:51.907 | INFO     | __main__:<module>:585 - FP16: True, workers/device: 1, device: auto
+2026-07-15 17:58:34.852 | INFO     | __main__:<module>:590 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 17:58:34.853 | INFO     | __main__:<module>:591 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 17:58:34.853 | INFO     | __main__:<module>:592 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 17:58:34.853 | INFO     | __main__:<module>:593 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 17:58:34.854 | INFO     | __main__:<module>:594 - FP16: True, workers/device: 1, device: auto
+2026-07-15 18:03:08.075 | INFO     | __main__:<module>:590 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 18:03:08.075 | INFO     | __main__:<module>:591 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 18:03:08.075 | INFO     | __main__:<module>:592 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 18:03:08.076 | INFO     | __main__:<module>:593 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 18:03:08.076 | INFO     | __main__:<module>:594 - FP16: True, workers/device: 1, device: auto
+2026-07-15 18:08:47.384 | INFO     | __main__:<module>:590 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 18:08:47.385 | INFO     | __main__:<module>:591 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 18:08:47.385 | INFO     | __main__:<module>:592 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 18:08:47.385 | INFO     | __main__:<module>:593 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 18:08:47.386 | INFO     | __main__:<module>:594 - FP16: True, workers/device: 1, device: auto
+2026-07-15 18:15:30.979 | INFO     | __main__:<module>:618 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 18:15:30.979 | INFO     | __main__:<module>:619 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 18:15:30.979 | INFO     | __main__:<module>:620 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 18:15:30.980 | INFO     | __main__:<module>:621 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 18:15:30.980 | INFO     | __main__:<module>:622 - FP16: True, workers/device: 1, device: auto
+2026-07-15 18:22:15.966 | INFO     | __main__:<module>:623 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-15 18:22:15.966 | INFO     | __main__:<module>:624 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-15 18:22:15.967 | INFO     | __main__:<module>:625 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-15 18:22:15.967 | INFO     | __main__:<module>:626 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-15 18:22:15.967 | INFO     | __main__:<module>:627 - FP16: True, workers/device: 1, device: auto
+2026-07-16 07:51:33.425 | INFO     | __main__:<module>:623 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 07:51:33.425 | INFO     | __main__:<module>:624 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 07:51:33.425 | INFO     | __main__:<module>:625 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 07:51:33.426 | INFO     | __main__:<module>:626 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 07:51:33.426 | INFO     | __main__:<module>:627 - FP16: True, workers/device: 1, device: auto
+2026-07-16 08:08:18.708 | INFO     | __main__:<module>:646 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 08:08:18.708 | INFO     | __main__:<module>:647 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 08:08:18.709 | INFO     | __main__:<module>:648 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 08:08:18.709 | INFO     | __main__:<module>:649 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 08:08:18.709 | INFO     | __main__:<module>:650 - FP16: True, workers/device: 1, device: auto
+2026-07-16 09:08:36.815 | INFO     | __main__:<module>:686 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 09:08:36.815 | INFO     | __main__:<module>:687 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 09:08:36.816 | INFO     | __main__:<module>:688 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 09:08:36.816 | INFO     | __main__:<module>:689 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 09:08:36.816 | INFO     | __main__:<module>:690 - FP16: True, workers/device: 1, device: auto
+2026-07-16 13:36:39.116 | INFO     | __main__:<module>:687 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 13:36:39.117 | INFO     | __main__:<module>:688 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 13:36:39.118 | INFO     | __main__:<module>:689 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 13:36:39.118 | INFO     | __main__:<module>:690 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 13:36:39.119 | INFO     | __main__:<module>:691 - FP16: True, workers/device: 1, device: auto
+2026-07-16 13:40:15.364 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 13:40:15.364 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 13:40:15.364 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 13:40:15.365 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 13:40:15.365 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-16 14:24:28.901 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 14:24:28.902 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 14:24:28.902 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 14:24:28.902 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 14:24:28.903 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-16 14:36:13.764 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 14:36:13.765 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 14:36:13.765 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 14:36:13.765 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 14:36:13.765 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-16 14:44:00.921 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 14:44:00.921 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 14:44:00.922 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 14:44:00.922 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 14:44:00.922 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-16 16:26:30.830 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 16:26:30.830 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 16:26:30.831 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 16:26:30.831 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 16:26:30.831 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-16 16:43:35.089 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 16:43:35.089 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 16:43:35.090 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 16:43:35.090 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 16:43:35.090 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-16 16:51:11.374 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 16:51:11.375 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 16:51:11.375 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 16:51:11.375 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 16:51:11.376 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-16 17:22:01.325 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 17:22:01.325 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 17:22:01.325 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 17:22:01.326 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 17:22:01.326 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-16 19:28:54.115 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-16 19:28:54.115 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-16 19:28:54.116 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-16 19:28:54.116 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-16 19:28:54.116 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-17 14:08:11.718 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-17 14:08:11.719 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-17 14:08:11.720 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-17 14:08:11.720 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-17 14:08:11.720 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-17 17:51:46.257 | INFO     | __main__:<module>:689 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-17 17:51:46.258 | INFO     | __main__:<module>:690 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-17 17:51:46.258 | INFO     | __main__:<module>:691 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-17 17:51:46.258 | INFO     | __main__:<module>:692 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-17 17:51:46.258 | INFO     | __main__:<module>:693 - FP16: True, workers/device: 2, device: auto
+2026-07-17 19:24:05.297 | INFO     | __main__:<module>:734 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-17 19:24:05.299 | INFO     | __main__:<module>:735 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-17 19:24:05.300 | INFO     | __main__:<module>:736 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-17 19:24:05.300 | INFO     | __main__:<module>:737 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-17 19:24:05.300 | INFO     | __main__:<module>:738 - FP16: True, workers/device: 2, device: auto
+2026-07-17 19:28:45.130 | INFO     | __main__:<module>:734 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-17 19:28:45.131 | INFO     | __main__:<module>:735 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-17 19:28:45.131 | INFO     | __main__:<module>:736 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-17 19:28:45.131 | INFO     | __main__:<module>:737 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-17 19:28:45.132 | INFO     | __main__:<module>:738 - FP16: True, workers/device: 2, device: auto
+2026-07-17 19:42:18.026 | INFO     | __main__:<module>:734 - IndexTTS2 LitServe Server - http://0.0.0.0:8002
+2026-07-17 19:42:18.026 | INFO     | __main__:<module>:735 -   TTS:    POST http://0.0.0.0:8002/tts
+2026-07-17 19:42:18.026 | INFO     | __main__:<module>:736 -   Voices: POST/GET http://0.0.0.0:8002/v1/audio/voices
+2026-07-17 19:42:18.027 | INFO     | __main__:<module>:737 -   Health: GET  http://0.0.0.0:8002/api/v1/health
+2026-07-17 19:42:18.027 | INFO     | __main__:<module>:738 - FP16: True, workers/device: 2, device: auto
