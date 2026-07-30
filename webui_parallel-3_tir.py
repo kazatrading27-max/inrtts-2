@@ -457,6 +457,7 @@ class GenerationJob:
     srt_duration_seconds: Optional[float] = None
     enable_post_stretch: bool = False
     tokens_per_second: float = TOKENS_PER_SECOND_DEFAULT
+    use_deterministic_seed: bool = True  # Default: use deterministic seeds for consistency
 
 
 # ============================================================================
@@ -1242,6 +1243,21 @@ def _worker_loop(job_queue: mp.Queue, result_queue: mp.Queue, config: Dict[str, 
                 **duration_kwargs,     # ← duration wins
             }
 
+            # Calculate deterministic seed for this segment.
+            # CRITICAL: seed depends ONLY on the voice prompt path, NOT on
+            # text/row_id. A constant seed across all segments makes every
+            # segment's GPT sampler + flow-matching noise lean the SAME way,
+            # producing cohesive timbre — identical to the direct webui path
+            # which is 100% consistent. Varying the seed per-segment (the old
+            # `prompt_path + text + row_id` formula) gave each segment an
+            # independent random lean, which is the confirmed source of the
+            # slight cross-segment timbre drift in SRT dubbing.
+            segment_seed = None
+            if job.use_deterministic_seed:
+                segment_seed = abs(hash(job.prompt_path)) % (2**31 - 1)
+                if job.verbose:
+                    print(f">> [Worker {worker_pid}] Row {job.row_id}: Using constant voice seed={segment_seed}")
+
             infer_args = {
                 "spk_audio_prompt": job.prompt_path,
                 "text": apply_language_prefix(job.text, job.language),
@@ -1254,6 +1270,7 @@ def _worker_loop(job_queue: mp.Queue, result_queue: mp.Queue, config: Dict[str, 
                 "use_random": job.emo_random,
                 "verbose": job.verbose,
                 "max_text_tokens_per_sentence": job.max_tokens,
+                "seed": segment_seed,  # ← Add deterministic seed
                 **final_infer_kwargs,   # ← merged, duration wins
             }
             # ── LATENT EXTRACTION ────────────────────────────────────────
@@ -1552,6 +1569,7 @@ def build_generation_kwargs(
     duration_mode_value, target_tokens_value, target_seconds_value,
     duration_scale_value, ref_text_value, language_value,
     tokens_per_second_value, enable_post_stretch_value,
+    diffusion_steps_value=32,
 ) -> Dict[str, Any]:
     try:
         top_k_int = int(top_k_value)
@@ -1588,6 +1606,7 @@ def build_generation_kwargs(
         "num_beams": num_beams_int,
         "repetition_penalty": float(repetition_penalty_value),
         "max_mel_tokens": int(max_mel_tokens_value),
+        "diffusion_steps": int(diffusion_steps_value or 32),
         "_duration_mode": str(duration_mode_value or "Auto"),
         "_target_tokens": int(target_tokens_value or 0),
         "_target_seconds": _target_seconds,
@@ -1857,6 +1876,11 @@ def create_demo() -> gr.Blocks:
                         maximum=max_mel_tokens_limit, step=10,
                         info="Duration control overrides this when active.",
                     )
+                    diffusion_steps_slider = gr.Slider(
+                        label="diffusion_steps (vocoder quality)",
+                        value=32, minimum=10, maximum=60, step=1,
+                        info="Higher = crisper audio, slower. 25=fast draft, 32=production, 40=max.",
+                    )
                     seed_value = gr.Number(
                         label="Seed", value=None,
                         precision=0, minimum=0, step=1,
@@ -1976,6 +2000,7 @@ def create_demo() -> gr.Blocks:
             duration_mode, target_tokens_slider, target_seconds_input,
             duration_scale_custom, ref_text_input, language_dropdown,
             tokens_per_second_slider, enable_post_stretch,
+            diffusion_steps_slider,
         ]
 
         # ── Tabs ──────────────────────────────────────────────────────────────
@@ -2662,6 +2687,7 @@ def create_demo() -> gr.Blocks:
                     srt_duration_seconds=seg["duration_seconds"],
                     enable_post_stretch=post_stretch_val,
                     tokens_per_second=dur_fields["tokens_per_second"],
+                    use_deterministic_seed=True,  # Enable deterministic seeds for SRT consistency
                 ))
 
             try:

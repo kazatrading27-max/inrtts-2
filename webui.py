@@ -578,6 +578,10 @@ def gen_single(emo_control_method,prompt, text,
         emo_text = None
 
     print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
+
+    # Use deterministic seed for consistency (hash of voice prompt path)
+    seed = abs(hash(prompt)) % (2**31 - 1) if prompt else None
+
     output = tts.infer(spk_audio_prompt=prompt, text=text,
                        output_path=output_path,
                        emo_audio_prompt=emo_ref_path, emo_alpha=emo_weight,
@@ -585,6 +589,7 @@ def gen_single(emo_control_method,prompt, text,
                        use_emo_text=(emo_control_method==3), emo_text=emo_text,use_random=emo_random,
                        verbose=cmd_args.verbose,
                        max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+                       seed=seed,  # Add deterministic seed
                        **kwargs)
     return gr.update(value=output,visible=True)
 

@@ -260,7 +260,7 @@ def infer_with_truncation_detection(**kwargs):
 
 def build_generation_kwargs(do_sample, top_p, top_k, temperature,
                              length_penalty, num_beams, repetition_penalty,
-                             max_mel_tokens):
+                             max_mel_tokens, diffusion_steps=32):
     """No decoding-strategy override. do_sample+num_beams>1 (beam_sample)
     was tested and confirmed BENEFICIAL for this finetune -- it acts as a
     built-in best-of-N candidate filter by cumulative log-probability.
@@ -274,6 +274,7 @@ def build_generation_kwargs(do_sample, top_p, top_k, temperature,
         "num_beams": int(num_beams),
         "repetition_penalty": float(repetition_penalty),
         "max_mel_tokens": int(max_mel_tokens),
+        "diffusion_steps": int(diffusion_steps or 32),
     }
 
 
@@ -580,7 +581,152 @@ def evaluate_audio_quality(file_path, text, min_chars_per_sec=2.0, max_chars_per
     return True, "ok"
 
 
+# ── SRT master assembly + background music ───────────────────
+
+def _srt_time_to_seconds(time_str):
+    """'00:01:23,456' -> 83.456 seconds. Returns 0.0 on any parse failure."""
+    try:
+        parts = time_str.replace(',', '.').split(':')
+        return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+    except Exception:
+        return 0.0
+
+
+def _assemble_srt_master(seg_records, sr=22050, gap_pad_sec=0.0):
+    """Build ONE continuous mono track from per-segment wavs, placing each
+    segment at its real SRT start time so the assembled voice track matches
+    the subtitle timeline. This is the correct base for a continuous music
+    bed (per-segment beds would restart jarringly at every cut).
+
+    seg_records: list of dicts with keys 'path' (wav on disk, may be None if
+                 the segment failed) and 'start'/'end' (SRT time strings).
+    gap_pad_sec: extra silent tail appended after the last segment.
+
+    Returns (master[np.float32 mono], sr). If no segment audio is available,
+    returns a short silence buffer.
+    Timeline strategy: honor SRT start times, but never overlap — if a
+    segment's audio would run past the next segment's start, segments are
+    laid back-to-back from the running write cursor instead (dubbing-safe:
+    no speech is ever clipped or overlapped).
+    """
+    loaded = []
+    for rec in seg_records:
+        p = rec.get("path")
+        if not p or not os.path.exists(p):
+            loaded.append((rec, None))
+            continue
+        try:
+            y, s = librosa.load(p, sr=sr, mono=True)
+            loaded.append((rec, y.astype(np.float32)))
+        except Exception:
+            loaded.append((rec, None))
+
+    # Determine total length: max of (last SRT end, running back-to-back end).
+    cursor = 0  # samples — running write position (prevents overlap)
+    placements = []  # (start_sample, audio)
+    for rec, y in loaded:
+        if y is None:
+            continue
+        srt_start = int(round(_srt_time_to_seconds(rec.get("start", "")) * sr))
+        start = max(cursor, srt_start)
+        placements.append((start, y))
+        cursor = start + len(y)
+
+    if not placements:
+        return np.zeros(int(sr * 0.5), dtype=np.float32), sr
+
+    total = cursor + int(round(gap_pad_sec * sr))
+    master = np.zeros(total, dtype=np.float32)
+    for start, y in placements:
+        end = start + len(y)
+        if end > len(master):  # safety, should not trigger
+            master = np.concatenate([master, np.zeros(end - len(master), dtype=np.float32)])
+        master[start:end] += y
+
+    # guard against summed peaks > 1 (segments never overlap, but be safe)
+    peak = float(np.max(np.abs(master))) if master.size else 0.0
+    if peak > 0.999:
+        master = master * (0.999 / peak)
+    return master, sr
+
+
+def _maybe_add_bg_music_to_master(master, sr, vec, emo_text, music_params, seed=None):
+    """Layer a single continuous, ducked music bed under an assembled SRT
+    master track. POST-PROCESSING ONLY — never touches TTS inference. Any
+    failure returns the dry master unchanged (with a warning).
+
+    Returns (mixed_or_dry[np.float32 mono], sr).
+    """
+    if not music_params or not music_params.get("enable"):
+        return master, sr
+    try:
+        import audio_bed
+        import music_source as _ms
+
+        prompt = _ms.emotion_to_prompt(
+            emo_vector=vec, emo_text=emo_text,
+            extra=music_params.get("prompt_extra") or None,
+        )
+        dur = max(1.0, len(master) / float(sr))
+
+        source_kind = music_params.get("source", "musicgen")
+        if source_kind in ("library", "files", "folder"):
+            src = _ms.make_source(
+                "library",
+                library_dir=music_params.get("library_dir", "music_library"))
+            music, sr_m = src.generate(prompt, dur, seed=seed,
+                                       mood=music_params.get("mood"))
+        else:
+            src = _ms.make_source(
+                "musicgen",
+                device=("cuda" if torch.cuda.is_available() else "cpu"))
+            music, sr_m = src.generate(prompt, dur, seed=seed)
+
+        mix, sr_out = audio_bed.mix_voice_with_bed(
+            master, sr, music, sr_m,
+            music_db=float(music_params.get("volume_db", -18.0)),
+            duck_db=float(music_params.get("duck_db", -12.0)),
+        )
+        print(f">> SRT background music added: {prompt!r} ({dur:.1f}s)")
+        return mix, sr_out
+    except Exception as e:
+        gr.Warning(i18n("Background music failed; returning voice only.") + f" ({e})")
+        print(f">> SRT background music FAILED (voice preserved): {e}")
+        return master, sr
+
+
 # ── gen_srt and gen_single ───────────────────
+
+def _resolve_duration_kwargs(duration_mode_val, target_duration_seconds_val,
+                              target_semantic_tokens_val, srt_seconds=None):
+    """Translate the shared Duration Control UI into tts.infer() kwargs.
+
+    Returns {} for "Auto"/invalid/unsupported combinations (zero behavior
+    change - native pacing), otherwise {"use_speed": True, "target_dur":
+    <seconds float>}. The server (infer_v2.py) converts seconds -> mel tokens
+    at 50 tokens/sec and only applies it to single-segment text (longer lines
+    silently fall back to Auto with a warning).
+
+    srt_seconds: the segment's own (end - start) seconds, used only for
+    "Match SRT Duration" mode (SRT Batch tab). Ignored otherwise / in the
+    direct-text tab where it is passed as None, so "Match SRT Duration" there
+    harmlessly degrades to Auto.
+    """
+    mode = duration_mode_val or "Auto"
+    try:
+        if mode == "Match SRT Duration":
+            if srt_seconds and float(srt_seconds) > 0:
+                return {"use_speed": True, "target_dur": float(srt_seconds)}
+        elif mode == "Seconds":
+            if target_duration_seconds_val and float(target_duration_seconds_val) > 0:
+                return {"use_speed": True, "target_dur": float(target_duration_seconds_val)}
+        elif mode == "Tokens":
+            if target_semantic_tokens_val and int(target_semantic_tokens_val) > 0:
+                return {"use_speed": True, "target_dur": int(target_semantic_tokens_val) / 50.0}
+    except Exception as e:
+        print(f">> Duration control: ignoring invalid target ({e}); using Auto.")
+    return {}
+
 
 def gen_srt(prompt, srt_file,
             emo_control_method, emo_ref_path, emo_weight,
@@ -605,11 +751,21 @@ def gen_srt(prompt, srt_file,
     
     do_sample, top_p, top_k, temperature, \
         length_penalty, num_beams, repetition_penalty, max_mel_tokens, trim_silence_val, \
-        max_retries_val, base_seed_val = args
+        max_retries_val, base_seed_val, diffusion_steps_val, \
+        bg_enable, bg_source, bg_prompt_extra, bg_volume_db, bg_duck_db, \
+        sfx_enable, sfx_source, sfx_prompt_extra, sfx_volume_db, sfx_duck_db, \
+        duration_mode_val, target_duration_seconds_val, target_semantic_tokens_val = args
+    # Background music + ambience (AFX) for SRT batch: after all segments are
+    # generated we assemble a timeline-accurate master track and lay a
+    # continuous ducked music bed and/or ambience bed under it (see
+    # _assemble_srt_master / _maybe_add_bg_music_to_master). The mixed master is
+    # added to the ZIP alongside the raw segments. Pure post-processing — never
+    # touches TTS inference.
 
     generation_kwargs = build_generation_kwargs(
         do_sample, top_p, top_k, temperature,
-        length_penalty, num_beams, repetition_penalty, max_mel_tokens
+        length_penalty, num_beams, repetition_penalty, max_mel_tokens,
+        diffusion_steps_val
     )
 
     if type(emo_control_method) is not int:
@@ -641,20 +797,29 @@ def gen_srt(prompt, srt_file,
     base_seed = int(base_seed_val)
     
     progress(0, desc=f"Start generating SRT dubbing (total {total} segments)...")
-    
+
     qa_log_lines = []
-    
+    seg_records = []  # for optional background-music master assembly
+
     for i, seg in enumerate(segments):
         progress((i + 1) / total, desc=f"Generating segment {i+1}/{total}...")
         out_path = os.path.join(out_dir, f"segment-{seg['index']:04d}.wav")
 
         segment_ok = False
         last_reason = ""
+        # Duration control (shared UI): "Match SRT Duration" derives the target
+        # from this segment's own subtitle timing; "Seconds"/"Tokens" use the
+        # fixed UI value; "Auto" -> {} (native pacing, no behavior change).
+        srt_seconds = _srt_time_to_seconds(seg['end']) - _srt_time_to_seconds(seg['start'])
+        duration_kwargs = _resolve_duration_kwargs(
+            duration_mode_val, target_duration_seconds_val,
+            target_semantic_tokens_val, srt_seconds=srt_seconds)
         for attempt in range(max_retries + 1):
-            if attempt == 0:
-                seed_for_attempt = base_seed
-            else:
-                seed_for_attempt = base_seed + (i * 1000) + attempt
+            # Use ONE constant seed for every segment AND every attempt.
+            # NOT base_seed + (i * 1000): per-segment seed variation makes each
+            # segment's timbre drift independently. A single constant seed
+            # across all segments matches the 100%-consistent direct webui path.
+            seed_for_attempt = base_seed
 
             try:
                 torch.manual_seed(seed_for_attempt)
@@ -662,7 +827,7 @@ def gen_srt(prompt, srt_file,
                     torch.cuda.manual_seed_all(seed_for_attempt)
 
                 if cmd_args.verbose:
-                    print(f">> Segment {seg['index']} attempt {attempt+1}: seed={seed_for_attempt}")
+                    print(f">> Segment {seg['index']} attempt {attempt+1}: seed={seed_for_attempt} (deterministic)")
 
                 _, was_truncated, trunc_msg = infer_with_truncation_detection(
                     spk_audio_prompt=prompt,
@@ -676,6 +841,8 @@ def gen_srt(prompt, srt_file,
                     use_random=emo_random,
                     verbose=cmd_args.verbose,
                     max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+                    seed=seed_for_attempt,  # Pass seed to infer
+                    **duration_kwargs,
                     **generation_kwargs
                 )
 
@@ -699,13 +866,70 @@ def gen_srt(prompt, srt_file,
             if trim_silence_val:
                 trim_audio_wav(out_path)
             success_count += 1
+            seg_records.append({"path": out_path, "start": seg["start"], "end": seg["end"]})
         else:
+            seg_records.append({"path": None, "start": seg["start"], "end": seg["end"]})
             qa_log_lines.append(f"Segment {seg['index']}: FAILED after {max_retries+1} attempts ({last_reason})")
             print(f">> Segment {seg['index']} permanently failed QA after {max_retries+1} attempts: {last_reason}")
 
     if success_count == 0:
         return gr.update(visible=False), i18n("All segments failed to generate, please check logs")
-        
+
+    # ── Optional: assemble a timeline master and lay a continuous music + ──
+    # ── ambience bed under it. Gated on bg_enable OR sfx_enable so default ──
+    # ── (both off) behavior is byte-for-byte unchanged. ──
+    music_note = ""
+    if bool(bg_enable) or bool(sfx_enable):
+        try:
+            master, m_sr = _assemble_srt_master(seg_records, sr=22050)
+            mixed, mix_sr = master, m_sr
+            applied = []
+
+            if bool(bg_enable):
+                mixed, mix_sr = _maybe_add_bg_music_to_master(
+                    mixed, mix_sr, vec, emo_text,
+                    {
+                        "enable": True,
+                        "source": bg_source,
+                        "prompt_extra": bg_prompt_extra,
+                        "volume_db": bg_volume_db,
+                        "duck_db": bg_duck_db,
+                    },
+                    seed=base_seed,
+                )
+                if mixed is not master:
+                    applied.append("music")
+
+            if bool(sfx_enable):
+                before = mixed
+                mixed, mix_sr = _apply_ambience_layer(
+                    mixed, mix_sr, vec, emo_text,
+                    {
+                        "enable": True,
+                        "source": sfx_source,
+                        "prompt_extra": sfx_prompt_extra,
+                        "volume_db": sfx_volume_db,
+                        "duck_db": sfx_duck_db,
+                    },
+                    seed=base_seed,
+                )
+                if mixed is not before:
+                    applied.append("ambience")
+
+            # Always write the dry assembled master; write the mix if anything applied.
+            master_path = os.path.join(out_dir, "dubbing_master.wav")
+            import audio_bed as _ab
+            _ab.save_wav(master_path, master, m_sr)
+            if applied:
+                music_path = os.path.join(out_dir, "dubbing_master_music.wav")
+                _ab.save_wav(music_path, mixed, mix_sr)
+                music_note = " + timeline master with " + "+".join(applied)
+            else:
+                music_note = " + timeline master (audio layers unavailable, dry only)"
+        except Exception as e:
+            gr.Warning(i18n("Background music failed; returning voice only.") + f" ({e})")
+            print(f">> SRT master/music assembly FAILED (segments preserved): {e}")
+
     zip_path = os.path.join(out_dir, "dubbing_segments.zip")
     with zipfile.ZipFile(zip_path, 'w') as z:
         for f in sorted(os.listdir(out_dir)):
@@ -717,11 +941,131 @@ def gen_srt(prompt, srt_file,
                 lf.write("\n".join(qa_log_lines))
             z.write(log_path, arcname="qa_failures.log")
 
-    status_msg = f"Done! Successfully generated {success_count}/{total} segments."
+    status_msg = f"Done! Successfully generated {success_count}/{total} segments{music_note}."
     if qa_log_lines:
         status_msg += f" ({len(qa_log_lines)} segment(s) failed QA even after retries — see qa_failures.log in the ZIP)"
 
     return gr.update(value=zip_path, visible=True), status_msg
+
+
+def _apply_ambience_layer(track, sr, vec, emo_text, sfx_params, seed=None):
+    """POST-PROCESSING ONLY. Layer a mood-matched ambience/SFX bed UNDER an
+    already-mixed track (voice, or voice+music). Uses the same ducking engine
+    as music. Any failure returns the track unchanged (with a warning).
+
+    sfx_params: dict with keys enable, source, prompt_extra, volume_db, duck_db.
+    Returns (track_or_mixed[np.float32], sr).
+    """
+    if not sfx_params or not sfx_params.get("enable"):
+        return track, sr
+    try:
+        import audio_bed
+        import music_source as _ms
+
+        prompt = _ms.emotion_to_sfx_prompt(
+            emo_vector=vec, emo_text=emo_text,
+            extra=sfx_params.get("prompt_extra") or None,
+        )
+        dur = max(1.0, len(track) / float(sr))
+
+        source_kind = sfx_params.get("source", "audiogen")
+        if source_kind in ("library", "files", "folder"):
+            src = _ms.make_source(
+                "library",
+                library_dir=sfx_params.get("library_dir", "sfx_library"))
+            sfx, sr_s = src.generate(prompt, dur, seed=seed,
+                                     mood=sfx_params.get("mood"))
+        elif source_kind in ("musicgen",):
+            src = _ms.make_source(
+                "musicgen",
+                device=("cuda" if torch.cuda.is_available() else "cpu"))
+            sfx, sr_s = src.generate(prompt, dur, seed=seed)
+        else:
+            src = _ms.make_source(
+                "audiogen",
+                device=("cuda" if torch.cuda.is_available() else "cpu"))
+            sfx, sr_s = src.generate(prompt, dur, seed=seed)
+
+        mix, sr_out = audio_bed.mix_voice_with_bed(
+            track, sr, sfx, sr_s,
+            music_db=float(sfx_params.get("volume_db", -24.0)),
+            duck_db=float(sfx_params.get("duck_db", -9.0)),
+            fade_in_sec=0.3,
+            fade_out_sec=0.3,   # tiny anti-click fade only
+            tail_sec=0.0,       # NEVER extend past the voice — mix length == voice length
+        )
+        print(f">> ambience/SFX added: {prompt!r} ({dur:.1f}s)")
+        return mix, sr_out
+    except Exception as e:
+        gr.Warning(i18n("Ambience/SFX failed; keeping previous audio.") + f" ({e})")
+        print(f">> ambience/SFX FAILED (audio preserved): {e}")
+        return track, sr
+
+
+def _maybe_add_bg_music(voice_path, vec, emo_text, music_params, seed=None,
+                        sfx_params=None):
+    """POST-PROCESSING ONLY. Layer a mood-matched music bed under an already-
+    generated voice wav. Never touches TTS inference. Any failure here is
+    swallowed with a warning so the voice output is always preserved.
+
+    music_params: dict with keys
+        enable (bool), source (str), prompt_extra (str),
+        volume_db (float), duck_db (float)
+    sfx_params: optional dict, same keys, for a mood-matched ambience/SFX bed
+        layered under the (voice or voice+music) result.
+    Returns the path to use (mixed file on success, original voice on any failure).
+    """
+    music_on = bool(music_params and music_params.get("enable"))
+    sfx_on = bool(sfx_params and sfx_params.get("enable"))
+    if not music_on and not sfx_on:
+        return voice_path
+    try:
+        import audio_bed
+        import music_source as _ms
+
+        voice, sr_v = audio_bed.load_wav(voice_path)
+        track, sr = voice, sr_v
+        did_something = False
+
+        # ---- music bed ----
+        if music_on:
+            prompt = _ms.emotion_to_prompt(
+                emo_vector=vec, emo_text=emo_text,
+                extra=music_params.get("prompt_extra") or None,
+            )
+            dur = max(1.0, len(track) / float(sr))
+            source_kind = music_params.get("source", "musicgen")
+            if source_kind in ("library", "files", "folder"):
+                src = _ms.make_source("library",
+                                      library_dir=music_params.get("library_dir", "music_library"))
+                music, sr_m = src.generate(prompt, dur, seed=seed,
+                                           mood=music_params.get("mood"))
+            else:
+                src = _ms.make_source("musicgen",
+                                      device=("cuda" if torch.cuda.is_available() else "cpu"))
+                music, sr_m = src.generate(prompt, dur, seed=seed)
+            track, sr = audio_bed.mix_voice_with_bed(
+                track, sr, music, sr_m,
+                music_db=float(music_params.get("volume_db", -18.0)),
+                duck_db=float(music_params.get("duck_db", -12.0)),
+            )
+            did_something = True
+            print(f">> background music added: {prompt!r}")
+
+        # ---- ambience / SFX bed (under voice+music) ----
+        if sfx_on:
+            track, sr = _apply_ambience_layer(track, sr, vec, emo_text, sfx_params, seed=seed)
+            did_something = True
+
+        if not did_something:
+            return voice_path
+        out = voice_path.rsplit(".", 1)[0] + "_music.wav"
+        audio_bed.save_wav(out, track, sr)
+        return out
+    except Exception as e:
+        gr.Warning(i18n("Background music failed; returning voice only.") + f" ({e})")
+        print(f">> background music FAILED (voice preserved): {e}")
+        return voice_path
 
 
 def gen_single(emo_control_method, prompt, text,
@@ -734,11 +1078,15 @@ def gen_single(emo_control_method, prompt, text,
     tts.gr_progress = progress
     do_sample, top_p, top_k, temperature, \
         length_penalty, num_beams, repetition_penalty, max_mel_tokens, trim_silence_val, \
-        max_retries_val, base_seed_val = args
+        max_retries_val, base_seed_val, diffusion_steps_val, \
+        bg_enable, bg_source, bg_prompt_extra, bg_volume_db, bg_duck_db, \
+        sfx_enable, sfx_source, sfx_prompt_extra, sfx_volume_db, sfx_duck_db, \
+        duration_mode_val, target_duration_seconds_val, target_semantic_tokens_val = args
 
     generation_kwargs = build_generation_kwargs(
         do_sample, top_p, top_k, temperature,
-        length_penalty, num_beams, repetition_penalty, max_mel_tokens
+        length_penalty, num_beams, repetition_penalty, max_mel_tokens,
+        diffusion_steps_val
     )
 
     if type(emo_control_method) is not int:
@@ -758,6 +1106,12 @@ def gen_single(emo_control_method, prompt, text,
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(base_seed)
 
+    # Duration control (shared UI): no SRT timing available in this tab, so
+    # "Match SRT Duration" harmlessly degrades to Auto (native pacing).
+    duration_kwargs = _resolve_duration_kwargs(
+        duration_mode_val, target_duration_seconds_val,
+        target_semantic_tokens_val, srt_seconds=None)
+
     _, was_truncated, trunc_msg = infer_with_truncation_detection(
         spk_audio_prompt=prompt,
         text=text,
@@ -770,13 +1124,33 @@ def gen_single(emo_control_method, prompt, text,
         use_random=emo_random,
         verbose=cmd_args.verbose,
         max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+        **duration_kwargs,
         **generation_kwargs
     )
     if was_truncated:
         gr.Warning(i18n("Generation was truncated by the model's internal length estimate; consider raising max_mel_tokens or applying the infer_v2.py source patch for this language.") + f" ({trunc_msg})")
     if trim_silence_val:
         trim_audio_wav(output_path)
-    return gr.update(value=output_path, visible=True)
+
+    final_path = _maybe_add_bg_music(
+        output_path, vec, emo_text,
+        {
+            "enable": bool(bg_enable),
+            "source": bg_source,
+            "prompt_extra": bg_prompt_extra,
+            "volume_db": bg_volume_db,
+            "duck_db": bg_duck_db,
+        },
+        seed=base_seed,
+        sfx_params={
+            "enable": bool(sfx_enable),
+            "source": sfx_source,
+            "prompt_extra": sfx_prompt_extra,
+            "volume_db": sfx_volume_db,
+            "duck_db": sfx_duck_db,
+        },
+    )
+    return gr.update(value=final_path, visible=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1176,7 +1550,7 @@ with gr.Blocks(
                 )
             with gr.Column(scale=1):
                 gen_button = gr.Button(i18n("Generate Speech"), key="gen_button", interactive=True)
-                output_audio = gr.Audio(label=i18n("Generation Result"), visible=True, key="output_audio")
+                output_audio = gr.Audio(label=i18n("Generation Result"), visible=True, key="output_audio", show_download_button=True)
 
         with gr.Row():
             experimental_checkbox = gr.Checkbox(label=i18n("Show experimental features"), value=False)
@@ -1246,7 +1620,17 @@ with gr.Blocks(
                         repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=2.0, minimum=0.1, maximum=20.0, step=0.1)
                         length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
                     max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info=i18n("Max tokens to generate, too small will truncate audio"), key="max_mel_tokens")
+                    diffusion_steps = gr.Slider(label="diffusion_steps", value=32, minimum=10, maximum=60, step=1, info=i18n("Vocoder quality: higher = crisper audio but slower. 25=fast draft, 32=production, 40=max."), key="diffusion_steps")
                     trim_silence = gr.Checkbox(label=i18n("Auto trim head/tail silence and tail noise"), value=True, info=i18n("Fixes the issue of model generating overly long silent tails"))
+                    with gr.Row():
+                        duration_mode = gr.Dropdown(
+                            label=i18n("Duration Control"),
+                            choices=["Auto", "Match SRT Duration", "Seconds", "Tokens"],
+                            value="Auto",
+                            info=i18n("Auto = native pacing (default, recommended). 'Match SRT Duration' targets each SRT segment's own subtitle timing (SRT Batch tab only - degrades to Auto in Audio Generation tab, no SRT timing available there). 'Seconds'/'Tokens' target a fixed length for every generation in either tab. Only applies to single-segment text; longer text falls back to Auto with a warning."),
+                        )
+                        target_duration_seconds = gr.Number(label=i18n("Target Duration (seconds)"), value=5.0, minimum=0.1, maximum=60.0, step=0.1, visible=False)
+                        target_semantic_tokens = gr.Number(label=i18n("Target Semantic Tokens"), value=250, minimum=1, maximum=3000, step=1, visible=False)
                     with gr.Row():
                         seed_number = gr.Number(label=i18n("Base Random Seed"), value=42, precision=0, info=i18n("Fixed seed enables reproducible debugging of a specific segment"))
                         max_retries_number = gr.Slider(label=i18n("Max Retries per Segment on QA Failure"), value=2, minimum=0, maximum=5, step=1, info=i18n("SRT batch only: automatically retries a segment with a new seed if audio fails quality check OR is detected as truncated by the model's internal length estimate"))
@@ -1264,10 +1648,44 @@ with gr.Blocks(
                             key="segments_preview",
                             wrap=True,
                         )
+            with gr.Accordion("🎵 " + i18n("Background Music (mood-matched, optional)"), open=False):
+                bg_enable = gr.Checkbox(label=i18n("Add background music under the voice"), value=False,
+                                        info=i18n("Post-processing only — never affects voice quality. Music is auto-matched to the detected emotion."))
+                with gr.Row():
+                    bg_source = gr.Dropdown(label=i18n("Music source"),
+                                            choices=["musicgen", "library"], value="musicgen",
+                                            info=i18n("musicgen = generate on GPU (small model). library = pick from a local folder."))
+                    bg_prompt_extra = gr.Textbox(label=i18n("Style hint (optional)"), value="",
+                                                 placeholder=i18n("e.g. lo-fi hip hop, cinematic strings, acoustic guitar"))
+                with gr.Row():
+                    bg_volume_db = gr.Slider(label=i18n("Music volume (dB below voice)"),
+                                             minimum=-36, maximum=-6, value=-18, step=1)
+                    bg_duck_db = gr.Slider(label=i18n("Ducking under speech (dB)"),
+                                           minimum=-24, maximum=0, value=-12, step=1,
+                                           info=i18n("How much the music dips while the voice is speaking."))
+                gr.Markdown("— " + i18n("Ambience / Sound Effects (AFX)") + " —")
+                sfx_enable = gr.Checkbox(label=i18n("Add mood-matched ambience under the voice"), value=False,
+                                         info=i18n("Environmental sound (rain, wind, room tone…) matched to the emotion. Layered UNDER music/voice, ducked like music. Post-processing only."))
+                with gr.Row():
+                    sfx_source = gr.Dropdown(label=i18n("SFX source"),
+                                             choices=["audiogen", "musicgen", "library"], value="audiogen",
+                                             info=i18n("audiogen = environmental SFX model (GPU). Falls back to voice if unavailable."))
+                    sfx_prompt_extra = gr.Textbox(label=i18n("Ambience hint (optional)"), value="",
+                                                  placeholder=i18n("e.g. light rain, distant crowd, office room tone"))
+                with gr.Row():
+                    sfx_volume_db = gr.Slider(label=i18n("Ambience volume (dB below voice)"),
+                                              minimum=-40, maximum=-10, value=-24, step=1)
+                    sfx_duck_db = gr.Slider(label=i18n("Ambience ducking under speech (dB)"),
+                                            minimum=-24, maximum=0, value=-9, step=1)
+
             advanced_params = [
                 do_sample, top_p, top_k, temperature,
                 length_penalty, num_beams, repetition_penalty, max_mel_tokens,
                 trim_silence, max_retries_number, seed_number,
+                diffusion_steps,
+                bg_enable, bg_source, bg_prompt_extra, bg_volume_db, bg_duck_db,
+                sfx_enable, sfx_source, sfx_prompt_extra, sfx_volume_db, sfx_duck_db,
+                duration_mode, target_duration_seconds, target_semantic_tokens,
             ]
 
         example_table = gr.Dataset(
@@ -1408,6 +1826,16 @@ with gr.Blocks(
     emo_control_method.change(on_method_change,
         inputs=[emo_control_method],
         outputs=[emotion_reference_group, emotion_randomize_group, emotion_vector_group, emo_text_group, emo_weight_group])
+
+    def on_duration_mode_change(mode):
+        return (
+            gr.update(visible=(mode == "Seconds")),
+            gr.update(visible=(mode == "Tokens")),
+        )
+
+    duration_mode.change(on_duration_mode_change,
+        inputs=[duration_mode],
+        outputs=[target_duration_seconds, target_semantic_tokens])
 
     def on_experimental_change(is_experimental, current_mode_index):
         new_choices = EMO_CHOICES_ALL if is_experimental else EMO_CHOICES_OFFICIAL

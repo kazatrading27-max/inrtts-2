@@ -276,6 +276,9 @@ class SpeechParams(BaseModel):
     diffusion_steps: int = Field(25, ge=1, le=50, description="Diffusion vocoder steps. 'max'=40, 'balanced'=25, 'fast'=12.")
     inference_cfg_rate: float = Field(0.7, ge=0.0, le=2.0, description="Classifier-free guidance strength for vocoder.")
     trim_silence: bool = Field(True, description="Automatically trim leading/trailing silence and trailing noise.")
+    duration_mode: str | None = Field(None, description="Duration control: 'Auto' (default/native pacing), 'Seconds' (target a wall-clock length), or 'Tokens' (target a semantic-token count). Only applies to single-segment text.")
+    target_duration_seconds: float | None = Field(None, gt=0.0, description="Target output duration in seconds when duration_mode='Seconds'.")
+    target_semantic_tokens: int | None = Field(None, gt=0, description="Target semantic (mel) token count when duration_mode='Tokens' (50 tokens/sec).")
 
 class OpenAISpeechRequest(SpeechParams):
     input: str = Field(..., min_length=1, description="Text to synthesize.")
@@ -397,7 +400,7 @@ def _extract_params(data: dict) -> dict:
         if key in params: params[key] = as_bool(params[key])
         elif key in data: params[key] = as_bool(data[key])
 
-    for key in ("interval_silence", "max_text_tokens_per_segment", "num_beams", "top_k", "max_mel_tokens", "diffusion_steps"):
+    for key in ("interval_silence", "max_text_tokens_per_segment", "num_beams", "top_k", "max_mel_tokens", "diffusion_steps", "seed"):
         if key in data and data[key] is not None: params[key] = int(data[key])
 
     for key in ("top_p", "temperature", "length_penalty", "repetition_penalty", "inference_cfg_rate"):
@@ -406,6 +409,12 @@ def _extract_params(data: dict) -> dict:
     if params.get("repetition_penalty", 10.0) <= 0: raise ValueError("repetition_penalty must be > 0")
     if params.get("temperature", 0.8) <= 0: raise ValueError("temperature must be > 0")
     if "top_p" in params and not 0 <= params["top_p"] <= 1: raise ValueError("top_p must be between 0 and 1")
+
+    # Validate seed range if provided
+    if "seed" in params:
+        seed_val = params["seed"]
+        if not (0 <= seed_val <= 2**31 - 1):
+            raise ValueError(f"seed must be between 0 and {2**31 - 1}")
 
     if data.get("quality_preset"): _apply_quality_preset(params, data["quality_preset"])
 
@@ -416,6 +425,26 @@ def _extract_params(data: dict) -> dict:
     if num_beams > 1 and do_sample:
         logger.info(f"Beam search requested (num_beams={num_beams}). Overriding do_sample=True to False for deterministic output.")
         params["do_sample"] = False
+
+    # Native IndexTTS2 duration control: translate the public duration_mode
+    # contract into the use_speed/target_dur kwargs infer_v2.py understands.
+    # Any mode other than "Seconds"/"Tokens" (including missing/"Auto") is a
+    # no-op, so existing callers see zero behavior change.
+    duration_mode = (data.get("duration_mode") or "").strip().lower()
+    if duration_mode == "seconds":
+        target_duration_seconds = data.get("target_duration_seconds")
+        if target_duration_seconds is not None and float(target_duration_seconds) > 0:
+            params["use_speed"] = True
+            params["target_dur"] = float(target_duration_seconds)
+        else:
+            logger.warning("duration_mode='Seconds' requires a positive target_duration_seconds; ignoring.")
+    elif duration_mode == "tokens":
+        target_semantic_tokens = data.get("target_semantic_tokens")
+        if target_semantic_tokens is not None and int(target_semantic_tokens) > 0:
+            params["use_speed"] = True
+            params["target_dur"] = int(target_semantic_tokens) / 50.0
+        else:
+            logger.warning("duration_mode='Tokens' requires a positive target_semantic_tokens; ignoring.")
 
     if _is_deepspeed_enabled(): _normalize_for_deepspeed(params)
 
@@ -935,6 +964,78 @@ async def audiox_generate(request: AudioXGenerateRequest = Body(...)):
 
 @app.get("/v1/audio/generate/health", tags=["Audio Generation"])
 async def audiox_health(): return {"available": _audiox_available(), "loaded": audiox_model is not None, "loaded_model": audiox_loaded_name}
+
+
+# ============== MusicGen Generation (BGM / SFX) ==============
+# Reuses music_source.py's MusicGenSource, which already runs in this same
+# process (webui_enhanced.py imports it for the WebUI's own BGM/SFX tab), so
+# 'audiocraft' is already installed here. This just exposes it over REST.
+
+musicgen_source: Any = None
+musicgen_loaded_name: Optional[str] = None
+
+def _musicgen_available() -> bool:
+    try:
+        return _importlib_util.find_spec("audiocraft") is not None
+    except Exception:
+        return False
+
+def _resolve_musicgen_model(name: Optional[str]) -> str:
+    return name or "facebook/musicgen-small"
+
+def _musicgen_ensure_loaded(model_name: str) -> None:
+    global musicgen_source, musicgen_loaded_name
+    if musicgen_source is not None and musicgen_loaded_name == model_name: return
+    import music_source
+    if musicgen_source is not None:
+        try: musicgen_source._unload()
+        except Exception: pass
+        musicgen_source = None
+    device = _audiox_device()
+    musicgen_source = music_source.make_source("musicgen", model_name=model_name, device=device, offload_after=True)
+    musicgen_loaded_name = model_name
+
+async def _guarded_musicgen_infer(prompt: str, duration_sec: float, seed: Optional[int], model_name: str) -> dict:
+    request_start = time.perf_counter()
+    if _queue_slots is None or _gpu_semaphore is None: raise RuntimeError("Inference queue not initialized")
+    accepted = await _acquire_with_timeout(_queue_slots, args.queue_timeout)
+    if not accepted: raise TimeoutError(f"Inference queue is full (wait exceeded {args.queue_timeout:.1f}s)")
+    try:
+        await _gpu_semaphore.acquire()
+        queue_elapsed = time.perf_counter() - request_start
+        infer_start = time.perf_counter()
+        def _work():
+            _musicgen_ensure_loaded(model_name)
+            return musicgen_source.generate(prompt, duration_sec, seed)
+        try: arr, sr = await asyncio.to_thread(_work)
+        finally: _gpu_semaphore.release()
+        return {"arr": arr, "sr": sr, "queue_time": queue_elapsed, "infer_time": time.perf_counter() - infer_start, "total_time": time.perf_counter() - request_start}
+    finally: _queue_slots.release()
+
+class MusicGenerateRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, description="MusicGen-style text prompt describing the desired music/SFX.")
+    duration_sec: float = Field(10.0, gt=0.0, le=30.0, description="Requested clip duration in seconds (MusicGen generates a short seed and the caller loops/trims it).")
+    seed: int | None = Field(None, description="Optional generation seed for reproducibility.")
+    model: str | None = Field(None, description="MusicGen checkpoint name, defaults to facebook/musicgen-small.")
+    response_format: ResponseFormat | None = Field("wav")
+
+@app.post("/v1/music/generate", tags=["Audio Generation"], responses=AUDIO_RESPONSES)
+async def musicgen_generate(request: MusicGenerateRequest = Body(...)):
+    if not _musicgen_available(): return JSONResponse(status_code=503, content={"error": "MusicGen (audiocraft) is not installed on the server."})
+    prompt = request.prompt.strip()
+    duration_sec = float(request.duration_sec)
+    model_name = _resolve_musicgen_model(request.model)
+    output_format = request.response_format or "wav"
+    try:
+        rec = await _guarded_musicgen_infer(prompt, duration_sec, request.seed, model_name)
+        arr, sr = rec["arr"], rec["sr"]
+        audio_bytes, media_type = _encode_audio(arr, sr, output_format)
+        return Response(content=audio_bytes, media_type=media_type, headers={"X-MusicGen-Model": model_name})
+    except TimeoutError as e: return JSONResponse(status_code=429, content={"error": str(e)})
+    except Exception as e: return JSONResponse(status_code=500, content={"error": f"Generation failed: {str(e)}"})
+
+@app.get("/v1/music/generate/health", tags=["Audio Generation"])
+async def musicgen_health(): return {"available": _musicgen_available(), "loaded": musicgen_source is not None, "loaded_model": musicgen_loaded_name}
 
 # ============== Mount WebUI ==============
 import gradio as gr

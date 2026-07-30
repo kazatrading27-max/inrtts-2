@@ -617,8 +617,10 @@ class UnifiedVoice(nn.Module):
         mel_codes = self.set_mel_padding(mel_codes, mel_codes_lengths)
         mel_codes = F.pad(mel_codes, (0, 1), value=self.stop_mel_token)
 
-        duration_emb = self.speed_emb(torch.zeros_like(use_speed))
-        duration_emb_half = self.speed_emb(torch.ones_like(use_speed))
+        duration_emb = self.mel_pos_embedding.emb(mel_codes_lengths) * use_speed.unsqueeze(1)
+        duration_emb_half = self.mel_pos_embedding.emb(mel_codes_lengths // 2) * use_speed.unsqueeze(1)
+        duration_emb = duration_emb + self.speed_emb(torch.zeros_like(use_speed)) * (1 - use_speed).unsqueeze(1)
+        duration_emb_half = duration_emb_half + self.speed_emb(torch.ones_like(use_speed)) * (1 - use_speed).unsqueeze(1)
         conds = torch.cat((speech_conditioning_latent + emo_vec.unsqueeze(1), duration_emb_half.unsqueeze(1), duration_emb.unsqueeze(1)), 1)
         text_inputs, text_targets = self.build_aligned_inputs_and_targets(text_inputs, self.start_text_token, self.stop_text_token)
         text_emb = self.text_embedding(text_inputs) + self.text_pos_embedding(text_inputs)
@@ -695,7 +697,7 @@ class UnifiedVoice(nn.Module):
         fake_inputs[:, -1] = self.start_mel_token
         return fake_inputs, batched_mel_emb, attention_mask
 
-    def inference_speech(self, speech_condition, text_inputs, emo_speech_condition=None, cond_lengths=None, emo_cond_lengths=None, emo_vec=None, use_speed=False, input_tokens=None, num_return_sequences=1,
+    def inference_speech(self, speech_condition, text_inputs, emo_speech_condition=None, cond_lengths=None, emo_cond_lengths=None, emo_vec=None, use_speed=False, num_codes=None, input_tokens=None, num_return_sequences=1,
                          max_generate_length=None, typical_sampling=False, typical_mass=.9, **hf_generate_kwargs):
         """
         Args:
@@ -704,6 +706,8 @@ class UnifiedVoice(nn.Module):
             cond_mel_lengths: lengths of the conditioning mel spectrograms in shape (b,) or (1,)
             input_tokens: additional tokens for generation in shape (b, s) or (s,)
             max_generate_length: limit the number of generated tokens
+            use_speed: when True, condition generation on an explicit target duration via `num_codes`
+            num_codes: target mel-token count (duration hint), required when use_speed=True
             hf_generate_kwargs: kwargs for `GPT2InferenceModel.generate(**hf_generate_kwargs)`
         """
 
@@ -714,7 +718,10 @@ class UnifiedVoice(nn.Module):
         if cond_lengths is None:
             cond_lengths = torch.tensor([speech_condition.shape[-1]], device=speech_condition.device)
         if emo_cond_lengths is None:
-            emo_cond_lengths = torch.tensor([emo_speech_condition.shape[-1]], device=speech_condition.device) 
+            emo_cond_lengths = torch.tensor([emo_speech_condition.shape[-1]], device=speech_condition.device)
+        if use_speed:
+            assert num_codes is not None and num_codes > 0, \
+                    "The parameter num_codes must be given a specific value."
 
         speech_conditioning_latent = self.get_conditioning(speech_condition.transpose(1,2), cond_lengths)
         if emo_vec is None:
@@ -725,9 +732,13 @@ class UnifiedVoice(nn.Module):
         else:
             print('Use the specified emotion vector')
 
-        tmp = torch.zeros(text_inputs.size(0)).to(text_inputs.device)
-        duration_emb =  self.speed_emb(torch.zeros_like(tmp).long())
-        duration_emb_half = self.speed_emb(torch.ones_like(tmp).long())
+        if use_speed:
+            duration_emb = self.mel_pos_embedding.emb(num_codes)
+            duration_emb_half = self.mel_pos_embedding.emb(num_codes // 2)
+        else:
+            tmp = torch.zeros(text_inputs.size(0)).to(text_inputs.device)
+            duration_emb =  self.speed_emb(torch.zeros_like(tmp).long())
+            duration_emb_half = self.speed_emb(torch.ones_like(tmp).long())
         conds_latent = torch.cat((speech_conditioning_latent + emo_vec.unsqueeze(1), duration_emb_half.unsqueeze(1), duration_emb.unsqueeze(1)), 1)
         input_ids, inputs_embeds, attention_mask = self.prepare_gpt_inputs(conds_latent, text_inputs)
         self.inference_model.store_mel_emb(inputs_embeds)

@@ -31,7 +31,23 @@ from modelscope import AutoModelForCausalLM
 import safetensors
 from transformers import SeamlessM4TFeatureExtractor
 import random
+import numpy as np
 import torch.nn.functional as F
+
+
+def set_seed(seed: int):
+    """
+    Set random seed for reproducibility across all random number generators.
+
+    Args:
+        seed (int): Random seed value
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 
 class IndexTTS2:
     def __init__(
@@ -328,11 +344,42 @@ class IndexTTS2:
         if self.gr_progress is not None:
             self.gr_progress(value, desc=desc)
 
-    def _load_and_cut_audio(self,audio_path,max_audio_length_seconds,verbose=False,sr=None):
+    def _load_and_cut_audio(self,audio_path,max_audio_length_seconds,verbose=False,sr=None,
+                            preprocess=True,target_dbfs=-23.0,trim_db=30.0):
         if not sr:
             audio, sr = librosa.load(audio_path)
         else:
             audio, _ = librosa.load(audio_path,sr=sr)
+
+        # --- REFERENCE PREPROCESSING (raises the cloning ceiling) ---
+        # The reference clip is the hard ceiling on cloned quality. Cleaning it
+        # up before feature extraction makes cloning robust to messy inputs.
+        # Applied to a numpy 1-D array while we still have one (pre-tensor).
+        if preprocess and audio.size > 0:
+            # 1) Trim leading/trailing silence. trim_db = how far below peak
+            #    still counts as silence (30 dB is conservative, keeps soft
+            #    speech onsets). Falls back to the original if trim nukes
+            #    everything (e.g. a very quiet clip).
+            trimmed, _ = librosa.effects.trim(audio, top_db=trim_db)
+            if trimmed.size >= sr * 0.5:  # keep only if >=0.5s survives
+                audio = trimmed
+            elif verbose:
+                print(">> ref-prep: trim would leave <0.5s, keeping untrimmed audio")
+
+            # 2) RMS loudness-normalize to a consistent target so every
+            #    reference presents the model with comparable energy. Guarded
+            #    against silence (rms==0) and clipping (peak cap at 0.99).
+            rms = np.sqrt(np.mean(audio ** 2))
+            if rms > 1e-6:
+                target_rms = 10 ** (target_dbfs / 20.0)
+                gain = target_rms / rms
+                peak = np.max(np.abs(audio)) * gain
+                if peak > 0.99:            # prevent clipping after gain
+                    gain *= 0.99 / peak
+                audio = audio * gain
+                if verbose:
+                    print(f">> ref-prep: trimmed+normalized (rms {rms:.4f}->{target_rms:.4f}, gain {gain:.3f})")
+
         audio = torch.tensor(audio).unsqueeze(0)
         max_audio_samples = int(max_audio_length_seconds * sr)
 
@@ -363,14 +410,16 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0,
+              seed=None, **generation_kwargs):
         if stream_return:
             return self.infer_generator(
                 spk_audio_prompt, text, output_path,
                 emo_audio_prompt, emo_alpha,
                 emo_vector,
                 use_emo_text, emo_text, use_random, interval_silence,
-                verbose, max_text_tokens_per_segment, stream_return, more_segment_before, **generation_kwargs
+                verbose, max_text_tokens_per_segment, stream_return, more_segment_before,
+                seed=seed, **generation_kwargs
             )
         else:
             try:
@@ -379,7 +428,8 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, more_segment_before, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, more_segment_before,
+                    seed=seed, **generation_kwargs
                 ))[0]
             except IndexError:
                 return None
@@ -388,7 +438,14 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, stream_return=False, quick_streaming_tokens=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=120, stream_return=False, quick_streaming_tokens=0,
+              seed=None, use_speed=False, target_dur=None, **generation_kwargs):
+        # Set seed for reproducibility if provided
+        if seed is not None:
+            set_seed(seed)
+            if verbose:
+                print(f">> Random seed set to: {seed}")
+
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
@@ -452,11 +509,12 @@ class IndexTTS2:
                                                                      n_quantizers=3,
                                                                      f0=None)[0]
 
-            self.cache_spk_cond = spk_cond_emb
-            self.cache_s2mel_style = style
-            self.cache_s2mel_prompt = prompt_condition
+            # Cache embeddings with .detach() to prevent gradient graph accumulation
+            self.cache_spk_cond = spk_cond_emb.detach()
+            self.cache_s2mel_style = style.detach()
+            self.cache_s2mel_prompt = prompt_condition.detach()
             self.cache_spk_audio_prompt = spk_audio_prompt
-            self.cache_mel = ref_mel
+            self.cache_mel = ref_mel.detach()
         else:
             style = self.cache_s2mel_style
             prompt_condition = self.cache_s2mel_prompt
@@ -488,7 +546,8 @@ class IndexTTS2:
             emo_attention_mask = emo_attention_mask.to(self.device)
             emo_cond_emb = self.get_emb(emo_input_features, emo_attention_mask)
 
-            self.cache_emo_cond = emo_cond_emb
+            # Cache emotion embedding with .detach() to prevent gradient graph accumulation
+            self.cache_emo_cond = emo_cond_emb.detach()
             self.cache_emo_audio_prompt = emo_audio_prompt
         else:
             emo_cond_emb = self.cache_emo_cond
@@ -497,6 +556,10 @@ class IndexTTS2:
         text_tokens_list = self.tokenizer.tokenize(text)
         segments = self.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens)
         segments_count = len(segments)
+
+        if use_speed and segments_count > 1:
+            print(f"  >> Warning: use_speed requested but text splits into {segments_count} segments; duration targeting only supports single-segment text. Falling back to Auto duration for this request.")
+            use_speed = False
 
         text_token_ids = self.tokenizer.convert_tokens_to_ids(text_tokens_list)
         if self.tokenizer.unk_token_id in text_token_ids:
@@ -518,6 +581,14 @@ class IndexTTS2:
         num_beams = generation_kwargs.pop("num_beams", 3)
         repetition_penalty = generation_kwargs.pop("repetition_penalty", 10.0)
         max_mel_tokens = generation_kwargs.pop("max_mel_tokens", 1500)
+        # --- QUALITY LEVERS (now runtime-configurable, previously hardcoded) ---
+        # diffusion_steps: CFM vocoder solver steps. 25 = speed default; 32 =
+        # production sweet spot; 40 = last audible gains. Higher = crisper,
+        # slower s2mel stage only. Pass per-job for draft-vs-final control.
+        diffusion_steps = generation_kwargs.pop("diffusion_steps", 32)
+        # inference_cfg_rate: how tightly the vocoder adheres to reference
+        # timbre. 0.7 = balanced default; raise toward 1.0 for more timbre lock.
+        inference_cfg_rate = generation_kwargs.pop("inference_cfg_rate", 0.7)
         sampling_rate = 22050
 
         # Inject safeguards against AR repetition loops if supported by backend
@@ -569,6 +640,22 @@ class IndexTTS2:
                 print(f"Dynamic max_mel_tokens for this segment: {dynamic_max_mel_tokens} (Text tokens: {text_tokens.shape[1]})")
             # ---------------------------------
 
+            # --- DURATION CONTROL (native IndexTTS2 use_speed) ---
+            # When a target duration is requested, convert it to a target
+            # mel-token count (50 tokens/sec, a fixed model constant) and clamp
+            # it against the dynamic KV-cache cap so an unreasonable target
+            # can't overrun generation. Only reachable for single-segment text
+            # (see the segments_count guard above).
+            num_codes = None
+            if use_speed and target_dur is not None and target_dur > 0:
+                target_num_codes = max(1, int(target_dur * 50))
+                clamped_num_codes = min(target_num_codes, dynamic_max_mel_tokens)
+                num_codes = torch.tensor([clamped_num_codes], device=self.device)
+                if verbose:
+                    print(f"Duration control active: target {target_dur:.2f}s -> {clamped_num_codes} mel tokens (dynamic cap {dynamic_max_mel_tokens}).")
+            seg_use_speed = bool(use_speed and num_codes is not None)
+            # ------------------------------------------------------
+
             m_start_time = time.perf_counter()
             with torch.no_grad():
                 with torch.amp.autocast(text_tokens.device.type, enabled=self.dtype is not None, dtype=self.dtype):
@@ -590,6 +677,8 @@ class IndexTTS2:
                         cond_lengths=torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_cond_lengths=torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_vec=emovec,
+                        use_speed=seg_use_speed,
+                        num_codes=num_codes,
                         do_sample=True,
                         top_p=top_p,
                         top_k=top_k,
@@ -628,7 +717,10 @@ class IndexTTS2:
                 # -----------------------------------------------
 
                 m_start_time = time.perf_counter()
-                use_speed = torch.zeros(spk_cond_emb.size(0)).to(spk_cond_emb.device).long()
+                if seg_use_speed:
+                    use_speed_tensor = torch.ones(spk_cond_emb.size(0)).to(spk_cond_emb.device).long()
+                else:
+                    use_speed_tensor = torch.zeros(spk_cond_emb.size(0)).to(spk_cond_emb.device).long()
                 with torch.amp.autocast(text_tokens.device.type, enabled=self.dtype is not None, dtype=self.dtype):
                     latent = self.gpt(
                         speech_conditioning_latent,
@@ -640,15 +732,15 @@ class IndexTTS2:
                         cond_mel_lengths=torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_cond_mel_lengths=torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_vec=emovec,
-                        use_speed=use_speed,
+                        use_speed=use_speed_tensor,
                     )
                     gpt_forward_time += time.perf_counter() - m_start_time
 
                 dtype = None
                 with torch.amp.autocast(text_tokens.device.type, enabled=dtype is not None, dtype=dtype):
                     m_start_time = time.perf_counter()
-                    diffusion_steps = 25
-                    inference_cfg_rate = 0.7
+                    # diffusion_steps / inference_cfg_rate now come from the
+                    # infer() call (defaults 32 / 0.7). See quality levers above.
                     latent = self.s2mel.models['gpt_layer'](latent)
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
                     S_infer = S_infer.transpose(1, 2)
