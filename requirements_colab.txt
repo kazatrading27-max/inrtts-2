@@ -1,0 +1,115 @@
+# =============================================================================
+# IndexTTS2 API Server — GOOGLE COLAB requirements (conflict-audited)
+#
+# Audited against the CURRENT Colab image (Python 3.12). The rules applied:
+#   - NOTHING here touches torch/torchaudio/torchvision  -> Colab's CUDA-matched
+#     builds stay intact (installing other builds is the #1 way people brick a
+#     Colab GPU runtime).
+#   - numpy/pandas/matplotlib/scipy/pillow/cv2/grpcio   -> left untouched, any
+#     version Colab ships satisfies every package below (this same dependency
+#     set is proven working under numpy 2.2.6 in the production env).
+#   - only >= ranges / soft upper bounds                -> pip's default
+#     "only-if-needed" strategy keeps Colab's preinstalls wherever possible;
+#     no silent downgrades of system-critical packages.
+#
+# Colab setup cells:
+#
+#   # [1] install + verify NOTHING conflicts afterwards
+#   !pip -q install -r requirements_colab.txt
+#   !pip -q install -e .
+#   !python -m nltk.downloader averaged_perceptron_tagger_eng punkt
+#   !pip check                 # MUST print: "No broken requirements found."
+#   !which ffmpeg              # /usr/bin/ffmpeg (preinstalled - do not install)
+#
+#   # [2] fetch checkpoints into ./checkpoints (your usual hf/modelscope script)
+#
+#   # [3] run  (T4: fp16 recommended; --share opens the public cloudflared URL)
+#   !python api_server.py --model_dir ./checkpoints --device cuda --fp16 --share
+#
+# If `pip check` ever reports a clash: fix THAT package only, then re-run
+# `pip check`. Never blanket-reinstall torch on Colab.
+# =============================================================================
+
+# ---- API server ----
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
+httpx>=0.27
+loguru>=0.7
+pydantic>=2.7
+
+# ---- WebUI ----
+# mount_gradio_app + queue() APIs are stable across 5.x/6.x; prod validated on 6.19.
+gradio>=5.0,<7
+gradio-client>=1.5
+
+# ---- Model loaders / HF stack ----
+# transformers bounded to the range your IndexTTS2 build was validated on
+# (4.57.6 in prod; staying <4.58 also avoids newer GenerationMixin refactors).
+transformers>=4.46,<4.58
+tokenizers>=0.20,<0.23
+accelerate>=1.1
+safetensors>=0.4
+huggingface-hub>=0.26
+modelscope>=1.20
+omegaconf>=2.3
+einops>=0.8
+sentencepiece>=0.2
+
+# ---- DeepSpeed (optional) ----
+# Colab compiles DeepSpeed's inference kernels with its gcc at first run (~1-3 min,
+# one-time). Comment this line out and run WITHOUT --deepspeed if the build ever
+# fails on the free tier - the server runs fine in plain PyTorch mode.
+deepspeed>=0.15
+ninja>=1.11
+
+# ---- Audio DSP ----
+librosa>=0.10            # pip auto-selects a numba/llvmlite pair matching Colab numpy
+soundfile>=0.12
+soxr>=0.4
+audioread>=3.0
+pyloudnorm>=0.1.1
+pydub>=0.25
+lameenc>=1.7
+ffmpeg-python>=0.2
+av>=12.0                 # manylinux cp312 wheels exist via PyAV 12+
+
+# ---- Text normalisation / G2P (zh + en) ----
+# pynini ships manylinux cp312 wheels for Colab's Python 3.12. If resolution ever
+# fails on a future image, replace both lines with:
+#   pip install git+https://github.com/wenet-e2e/WeTextProcessing.git
+wetextprocessing>=1.0
+pynini>=2.1.5
+g2p-en>=2.1.0
+nltk>=3.8
+cn2an==0.5.24
+proces>=0.1.7
+jieba>=0.42
+num2words>=0.5
+
+# ---- BGM / SFX: MusicGen (audiocraft) ----
+# Works with Colab's bundled torch>=2.1 and numpy 2.x (proven on numpy 2.2.6).
+audiocraft==1.3.0
+sphn>=0.1
+julius>=0.2.7
+argbind>=0.3
+flatten-dict>=0.4
+demucs>=4.0.1
+
+# ---- BGM / SFX: AudioX (HKUSTAudio) — optional; the API self-checks availability ----
+# NOTE: Colab already ships opencv-python (cv2). Do NOT add opencv-python-headless
+# here — the two packages share the cv2 namespace and break each other's installs.
+# audiox's read_video() uses the preinstalled cv2 as-is.
+# If 'audiox' fails to resolve on PyPI for your image, comment it out (TTS/MusicGen
+# are unaffected) or install from the HKUSTAudio repo.
+audiox==0.2.0
+descript-audio-codec>=1.0
+descript-audiotools>=0.7.2    # if its resolver pulls an old librosa, drop this line + audiox
+torchtyping>=0.1.5
+
+# ---- Optional extras (leave commented unless needed) ----
+# openai-whisper>=20231117     # transcription helpers
+# xformers                     # NEVER pin a version on Colab - unpinned lets pip
+                               # match whatever torch Colab shipped; a mismatch here
+                               # is the classic "undefined symbol" runtime crash.
+# =============================================================================
