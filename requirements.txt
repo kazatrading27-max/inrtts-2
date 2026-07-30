@@ -85,7 +85,11 @@ flashy==0.0.2
 demucs==4.1.0                    # audiocraft source-separation dep chain
 
 # ---- BGM / SFX: AudioX (HKUSTAudio) ----
-audiox==0.2.0
+# AudioX is not published to PyPI under this name (the PyPI "audiox" 1.0.0
+# package is unrelated). Install the real HKUSTAudio project from source.
+# Replace <commit-sha> with the actual SHA you want to pin to for reproducibility,
+# or drop the @<commit-sha> to track main.
+audiox @ git+https://github.com/HKUSTAudio/AudioX.git
 descript-audio-codec==1.0.0       # DAC token (de)coding
 descript-audiotools==0.7.2
 opencv-python-headless==5.0.0.93  # video prompt reading (read_video)
