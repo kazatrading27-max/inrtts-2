@@ -1,0 +1,1 @@
+'}")\n        return master, sr\n\n\n# ── gen_srt and gen_single ───────────────────\n\ndef gen_srt(prompt, srt_file,'
