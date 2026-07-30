@@ -1,15 +1,5 @@
 # =============================================================================
-# IndexTTS2 API Server — Kaggle Compatible requirements
-#
-# Adjusted for standard Kaggle Notebook environments (Python 3.10/3.11, CUDA 12).
-# - Hallucinated future versions replaced with real PyPI versions.
-# - Core packages use minimum constraints (>=) to avoid breaking Kaggle's 
-#   pre-installed CUDA-enabled torch/numpy environments.
-# - AudioX is correctly sourced from GitHub.
-#
-# Install:
-#     pip install -r requirements.txt
-#     pip install -e .                  # the local indextts package itself
+# IndexTTS2 API Server — Kaggle / Lightning Compatible requirements
 # =============================================================================
 
 # ---- API server ----
@@ -28,7 +18,7 @@ gradio==4.44.1
 gradio-client==1.3.0
 
 # ---- Torch stack ----
-# Note: Using >= prevents breaking Kaggle's native CUDA-enabled torch builds.
+# Note: Using >= prevents breaking the environment's pre-installed CUDA-enabled torch builds.
 torch>=2.4.0
 torchaudio>=2.4.0
 torchvision>=0.19.0
@@ -48,7 +38,6 @@ einops>=0.8.0
 sentencepiece==0.2.0              # bpe.model tokenizer
 
 # ---- Numerics / audio DSP ----
-# Note: Using >= for numpy/scipy avoids breaking Kaggle's core environment.
 numpy>=1.26.0
 scipy>=1.13.0
 librosa>=0.10.2.post1             # silence trimming (librosa.effects.trim)
@@ -82,13 +71,14 @@ flashy>=0.0.2
 demucs>=4.0.1                     # audiocraft source-separation dep chain
 
 # ---- BGM / SFX: AudioX (HKUSTAudio) ----
-# AudioX is not on PyPI under this name; the PyPI "audiox" 1.0.0 package is unrelated.
-# Install the real HKUSTAudio project from source.
-audiox @ git+https://github.com/HKUSTAudio/AudioX.git@main
-descript-audio-codec>=1.0.0       # DAC token (de)coding
-descript-audiotools>=0.7.4
-opencv-python-headless>=4.8.0     # video prompt reading (read_video)
-torchtyping>=0.1.5
+# NOTE: The URL https://github.com/HKUSTAudio/AudioX.git prompts for credentials,
+# meaning the repo is either private, renamed, or does not exist.
+# Commenting out for now until the correct source/URL is confirmed.
+# audiox @ git+https://github.com/HKUSTAudio/AudioX.git@main
+# descript-audio-codec>=1.0.0       # DAC token (de)coding
+# descript-audiotools>=0.7.4
+# opencv-python-headless>=4.8.0     # video prompt reading (read_video)
+# torchtyping>=0.1.5
 
 # ---- Common transitives ----
 requests>=2.32.0
@@ -100,11 +90,3 @@ packaging>=24.1
 regex>=2024.5.15
 psutil>=6.0.0
 click>=8.1.7
-
-# =============================================================================
-# Optional extras (installed in your env but NOT required by the server):
-#   openai-whisper==20231117        # if you re-enable audio transcription helpers
-#   spacy==3.7.5                    # NLP helpers for custom pipelines
-#   prometheus-fastapi-instrumentator==7.0.0   # /metrics endpoint
-#   webrtcvad==2.0.10               # VAD-based realtime streaming variants
-# =============================================================================
