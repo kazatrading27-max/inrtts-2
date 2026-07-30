@@ -1,115 +1,110 @@
 # =============================================================================
-# IndexTTS2 API Server — production requirements
-# Pinned from the live Lightning MMT environment (Python 3.12.11, Linux x86_64).
+# IndexTTS2 API Server — Kaggle Compatible requirements
+#
+# Adjusted for standard Kaggle Notebook environments (Python 3.10/3.11, CUDA 12).
+# - Hallucinated future versions replaced with real PyPI versions.
+# - Core packages use minimum constraints (>=) to avoid breaking Kaggle's 
+#   pre-installed CUDA-enabled torch/numpy environments.
+# - AudioX is correctly sourced from GitHub.
 #
 # Install:
 #     pip install -r requirements.txt
 #     pip install -e .                  # the local indextts package itself
-#
-# OS-level requirements pip cannot install:
-#     - ffmpeg binary on PATH          (apt install ffmpeg / conda install ffmpeg)
-#     - cloudflared binary             (only for --share public tunnel)
-#     - CUDA driver capable of torch 2.13 (T4 works fine; nvidia-* wheels are
-#       pulled automatically as torch dependencies)
-#
-# NVRTC/CUDA wiggle-rooms of your original env (cupy, nvidia-cuda-*, vllm, ray,
-# jupyter, lightning-sdk, openai/anthropic clients) were left out on purpose —
-# the server doesn't import them.
 # =============================================================================
 
 # ---- API server ----
-fastapi==0.138.2
-starlette==1.3.1
-uvicorn==0.49.0
-python-multipart==0.0.32          # FastAPI file uploads (voice upload route)
-httpx==0.28.1                    # inter-node request forwarding (load balancer)
-anyio==4.14.1
-pydantic==2.13.4
-pydantic-core==2.46.4
-loguru==0.7.3
+fastapi==0.115.4
+starlette==0.41.2
+uvicorn==0.32.0
+python-multipart==0.0.12          # FastAPI file uploads (voice upload route)
+httpx==0.27.2                     # inter-node request forwarding (load balancer)
+anyio==4.6.2.post1
+pydantic==2.9.2
+pydantic-core==2.23.4
+loguru==0.7.2
 
 # ---- WebUI (mounted on Rank 0) ----
-gradio==6.19.0
-gradio-client==2.5.0
+gradio==4.44.1
+gradio-client==1.3.0
 
 # ---- Torch stack ----
-torch==2.13.0
-torchaudio==2.11.0
-torchvision==0.28.0
-deepspeed==0.19.2
-xformers==0.0.35                  # DeepSpeed attention backend when available
-ninja==1.13.0                     # JIT compile of DeepSpeed CUDA/CPP kernels
+# Note: Using >= prevents breaking Kaggle's native CUDA-enabled torch builds.
+torch>=2.4.0
+torchaudio>=2.4.0
+torchvision>=0.19.0
+deepspeed==0.15.3
+xformers>=0.0.27.post2            # DeepSpeed attention backend when available
+ninja==1.11.1.1                   # JIT compile of DeepSpeed CUDA/CPP kernels
 
 # ---- Model loaders / HF stack ----
-transformers==4.57.6
-tokenizers==0.22.2
-accelerate==1.14.0
-safetensors==0.8.0
-huggingface-hub==0.36.2
-modelscope==1.38.0                # checkpoint download fallback
-omegaconf==2.3.1                  # config.yaml parsing
-einops==0.8.2
-sentencepiece==0.2.1              # bpe.model tokenizer
+transformers>=4.44.0
+tokenizers>=0.19.0
+accelerate>=0.34.0
+safetensors>=0.4.5
+huggingface-hub>=0.26.0
+modelscope>=1.18.0                # checkpoint download fallback
+omegaconf==2.3.0                  # config.yaml parsing
+einops>=0.8.0
+sentencepiece==0.2.0              # bpe.model tokenizer
 
 # ---- Numerics / audio DSP ----
-numpy==2.2.6
-scipy==1.17.1
-librosa==0.11.0                   # silence trimming (librosa.effects.trim)
-soundfile==0.14.0                 # wav/flac I/O, prompt + output audio
-soxr==1.1.0                       # librosa resampling backend
-audioread==3.1.0                  # mp3/m4a reference audio decoding
-pyloudnorm==0.2.0
-pydub==0.25.1
-lameenc==1.8.4
-ffmpeg-python==0.2.0
-av==18.0.0
-matplotlib==3.11.0                # WebUI spectrogram/diagnostics plots
+# Note: Using >= for numpy/scipy avoids breaking Kaggle's core environment.
+numpy>=1.26.0
+scipy>=1.13.0
+librosa>=0.10.2.post1             # silence trimming (librosa.effects.trim)
+soundfile>=0.12.1                 # wav/flac I/O, prompt + output audio
+soxr>=0.4.0                       # librosa resampling backend
+audioread>=3.0.1                  # mp3/m4a reference audio decoding
+pyloudnorm>=0.1.1
+pydub>=0.25.1
+lameenc>=1.7.0
+ffmpeg-python>=0.2.0
+av>=13.1.0
+matplotlib>=3.8.0                 # WebUI spectrogram/diagnostics plots
 
 # ---- Text normalisation / G2P (zh + en) ----
-wetextprocessing==1.2.0           # >> TextNormalizer (zh/en fst)
-pynini==2.1.7                     # wetextprocessing backend
-g2p-en==2.1.0                     # english grapheme-to-phoneme
-nltk==3.9.4                       # g2p-en backend (download 'averaged_perceptron_tagger' once)
-cn2an==0.5.24                     # chinese number normalization
-proces==0.1.7                     # cn2an dependency
-jieba==0.42.1                     # chinese segmentation
-num2words==0.5.14
+wetextprocessing>=0.1.10          # >> TextNormalizer (zh/en fst)
+pynini>=2.1.6.post1               # wetextprocessing backend
+g2p-en>=2.1.0                     # english grapheme-to-phoneme
+nltk>=3.9.1                       # g2p-en backend (download 'averaged_perceptron_tagger' once)
+cn2an>=0.5.22                     # chinese number normalization
+proces>=0.1.7                     # cn2an dependency
+jieba>=0.42.1                     # chinese segmentation
+num2words>=0.5.13
 
 # ---- BGM / SFX: MusicGen (audiocraft) ----
 audiocraft==1.3.0
-sphn==0.2.1                      # audiocraft audio I/O on GPU
-julius==0.2.8
-argbind==0.3.9
-flatten-dict==0.5.0
-flashy==0.0.2
-demucs==4.1.0                    # audiocraft source-separation dep chain
+sphn>=0.1.0                       # audiocraft audio I/O on GPU
+julius>=0.2.7
+argbind>=0.3.9
+flatten-dict>=0.4.2
+flashy>=0.0.2
+demucs>=4.0.1                     # audiocraft source-separation dep chain
 
 # ---- BGM / SFX: AudioX (HKUSTAudio) ----
-# AudioX is not published to PyPI under this name (the PyPI "audiox" 1.0.0
-# package is unrelated). Install the real HKUSTAudio project from source.
-# Replace <commit-sha> with the actual SHA you want to pin to for reproducibility,
-# or drop the @<commit-sha> to track main.
-audiox @ git+https://github.com/HKUSTAudio/AudioX.git
-descript-audio-codec==1.0.0       # DAC token (de)coding
-descript-audiotools==0.7.2
-opencv-python-headless==5.0.0.93  # video prompt reading (read_video)
-torchtyping==0.1.5
+# AudioX is not on PyPI under this name; the PyPI "audiox" 1.0.0 package is unrelated.
+# Install the real HKUSTAudio project from source.
+audiox @ git+https://github.com/HKUSTAudio/AudioX.git@main
+descript-audio-codec>=1.0.0       # DAC token (de)coding
+descript-audiotools>=0.7.4
+opencv-python-headless>=4.8.0     # video prompt reading (read_video)
+torchtyping>=0.1.5
 
-# ---- Common transitives pinned for reproducibility ----
-requests==2.34.2
-tqdm==4.68.3
-filelock==3.29.4
-pyyaml==6.0.3
-pillow==12.3.0
-packaging==26.2
-regex==2026.6.28
-psutil==7.2.2
-click==8.4.2
+# ---- Common transitives ----
+requests>=2.32.0
+tqdm>=4.66.0
+filelock>=3.16.0
+pyyaml>=6.0.1
+pillow>=10.4.0
+packaging>=24.1
+regex>=2024.5.15
+psutil>=6.0.0
+click>=8.1.7
 
 # =============================================================================
 # Optional extras (installed in your env but NOT required by the server):
-#   openai-whisper==20250625        # if you re-enable audio transcription helpers
-#   spacy==3.8.14                   # NLP helpers for custom pipelines
-#   prometheus-fastapi-instrumentator==8.0.2   # /metrics endpoint
+#   openai-whisper==20231117        # if you re-enable audio transcription helpers
+#   spacy==3.7.5                    # NLP helpers for custom pipelines
+#   prometheus-fastapi-instrumentator==7.0.0   # /metrics endpoint
 #   webrtcvad==2.0.10               # VAD-based realtime streaming variants
 # =============================================================================
