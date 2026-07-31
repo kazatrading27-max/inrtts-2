@@ -39,7 +39,7 @@ einops>=0.8.0
 sentencepiece>=0.2.0           # bpe.model tokenizer
 
 # ---- Numerics / audio DSP ----
-numpy>=1.26.0
+numpy>=1.26.0,<2.0.0
 scipy>=1.13.0
 librosa>=0.10.2.post1          # silence trimming (librosa.effects.trim)
 soundfile>=0.12.1              # wav/flac I/O, prompt + output audio
