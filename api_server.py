@@ -102,7 +102,7 @@ def _i_am_master() -> bool:
         return _orig_master_addr in _local_ips()
 
 # ---- node rank: explicit override -> Lightning/torchrun conventions -> heuristic
-_rank, _rank_src = _env_int("INDEXTTS_RANK", "RANK", "LOCAL_RANK", "NODE_RANK", "GROUP_RANK")
+_rank, _rank_src = _env_int("INDEXTTS_RANK", "NODE_RANK", "GROUP_RANK", "RANK")
 if _rank is None:
     _rank, _rank_src = (0 if _i_am_master() else 1), "heuristic(ip-ownership)"
 
