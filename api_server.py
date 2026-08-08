@@ -114,18 +114,19 @@ my_rank, my_world_size = _rank, _world
 
 # ---- AUTO-HEAL role flips: env rank says 0 but we don't own MASTER_ADDR (or the
 # reverse). This is precisely the "both machines are rank 0, nobody connects" failure.
-if my_world_size > 1:
-    if my_rank == 0 and not _i_am_master():
-        logger.critical(f"[boot] env claims rank=0 (source={_rank_src}) but MASTER_ADDR "
-                        f"{_orig_master_addr} does NOT resolve to this host — flipping to worker rank 1. "
-                        f"Set INDEXTTS_RANK explicitly to override.")
-        my_rank = 1
-        _rank_src = "auto-flip"
-    elif my_rank != 0 and _i_am_master():
-        logger.critical(f"[boot] env claims rank={my_rank} (source={_rank_src}) but this host OWNS "
-                        f"MASTER_ADDR {_orig_master_addr} — flipping to rank 0.")
-        my_rank = 0
-        _rank_src = "auto-flip"
+# NOTE: Disabled to allow single-machine 2x GPU runs on Kaggle via torchrun
+# if my_world_size > 1:
+#     if my_rank == 0 and not _i_am_master():
+#         logger.critical(f"[boot] env claims rank=0 (source={_rank_src}) but MASTER_ADDR "
+#                         f"{_orig_master_addr} does NOT resolve to this host — flipping to worker rank 1. "
+#                         f"Set INDEXTTS_RANK explicitly to override.")
+#         my_rank = 1
+#         _rank_src = "auto-flip"
+#     elif my_rank != 0 and _i_am_master():
+#         logger.critical(f"[boot] env claims rank={my_rank} (source={_rank_src}) but this host OWNS "
+#                         f"MASTER_ADDR {_orig_master_addr} — flipping to rank 0.")
+#         my_rank = 0
+#         _rank_src = "auto-flip"
 
 _DIST_ENV_DUMP = {k: os.environ.get(k) for k in (
     "INDEXTTS_RANK", "INDEXTTS_WORLD_SIZE", "NODE_RANK", "GROUP_RANK", "RANK",
