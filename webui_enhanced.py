@@ -1550,7 +1550,7 @@ with gr.Blocks(
                 )
             with gr.Column(scale=1):
                 gen_button = gr.Button(i18n("Generate Speech"), key="gen_button", interactive=True)
-                output_audio = gr.Audio(label=i18n("Generation Result"), visible=True, key="output_audio", show_download_button=True)
+                output_audio = gr.Audio(label=i18n("Generation Result"), visible=True, key="output_audio")
 
         with gr.Row():
             experimental_checkbox = gr.Checkbox(label=i18n("Show experimental features"), value=False)

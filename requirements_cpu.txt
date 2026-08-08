@@ -1,0 +1,60 @@
+# =============================================================================
+# IndexTTS2 API Server — Windows 11 / CPU / uv — CORE
+# Torch installed separately in install.ps1 — do NOT add
+# --extra-index-url / --index-url here.
+# =============================================================================
+
+# ---- API server ----
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+httpx==0.27.2
+anyio==4.4.0
+pydantic==2.9.2
+loguru==0.7.2
+
+# ---- WebUI ----
+gradio==4.44.0
+
+# ---- Model loaders / HF stack ----
+transformers==4.44.2
+accelerate==0.34.2
+safetensors==0.4.5
+huggingface-hub==0.24.6
+modelscope==1.17.1
+omegaconf==2.3.0
+einops==0.8.0
+sentencepiece==0.2.0
+
+# ---- Numerics / audio DSP ----
+numpy==1.26.4
+scipy==1.13.1
+librosa==0.10.2
+soundfile==0.12.1
+soxr==0.5.0
+audioread==3.0.1
+pyloudnorm==0.1.1
+pydub==0.25.1
+lameenc==1.7.0
+ffmpeg-python==0.2.0
+av==12.3.0
+matplotlib==3.9.2
+
+# ---- Text normalisation / G2P ----
+g2p-en==2.1.0
+nltk==3.9.1
+cn2an==0.5.22
+proces==0.1.7
+jieba==0.42.1
+num2words==0.5.13
+
+# ---- Common transitives ----
+requests==2.32.3
+tqdm==4.66.5
+filelock==3.15.4
+pyyaml==6.0.2
+pillow==10.4.0
+packaging==24.1
+regex==2024.7.24
+psutil==6.0.0
+click==8.1.7
