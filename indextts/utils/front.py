@@ -129,7 +129,7 @@ class TextNormalizer:
             # use new cache dir for build tagger rules with disable remove_interjections and remove_erhua
             cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tagger_cache")
             if not os.path.exists(cache_dir):
-                os.makedirs(cache_dir)
+                os.makedirs(cache_dir, exist_ok=True)
                 with open(os.path.join(cache_dir, ".gitignore"), "w") as f:
                     f.write("*\n")
             self.zh_normalizer = NormalizerZh(
