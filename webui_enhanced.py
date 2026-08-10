@@ -1,13 +1,12 @@
 import html
-import inspect
 import json
 import os
 import re
 import sys
 import threading
 import time
-import warnings as warnings_module
 import zipfile
+import asyncio
 
 import warnings
 
@@ -18,18 +17,6 @@ import numpy as np
 import librosa
 import soundfile as sf
 import pandas as pd
-import torch
-
-# === Deterministic CUDA/cuDNN behavior =====================================
-# Purely for seed reproducibility; does not affect decoding strategy or
-# sampling logic. Confirmed NOT implicated in any regression tested so far.
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-try:
-    torch.use_deterministic_algorithms(True, warn_only=True)
-except Exception:
-    pass
-# ============================================================================
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -48,32 +35,93 @@ parser.add_argument("--fp16", action="store_true", default=False, help="Use FP16
 parser.add_argument("--deepspeed", action="store_true", default=False, help="Use DeepSpeed to accelerate if available")
 parser.add_argument("--cuda_kernel", action="store_true", default=False, help="Use CUDA kernel for inference if available")
 parser.add_argument("--gui_seg_tokens", type=int, default=120, help="GUI: Max tokens per generation segment")
+parser.add_argument("--vllm", action="store_true", default=False,
+                    help="Use vLLM to accelerate GPT inference (requires converted checkpoints/gpt/)")
+parser.add_argument("--gpu_memory_utilization", type=float, default=0.40,
+                    help="vLLM GPU memory utilization fraction (0.0-1.0). Default 0.40 = 40%% of VRAM.")
+parser.add_argument("--qwenemo_gpu_memory_utilization", type=float, default=0.10,
+                    help="vLLM GPU memory for Qwen emotion model. Default 0.10 = 10%%.")
 cmd_args, _ = parser.parse_known_args()
 
 # ── Required files check ──────────────────────────────────────────────────────
-required_files = [
+required_files_base = [
     "bpe.model",
     "s2mel.pth",
     "wav2vec2bert_stats.pt",
-    "gpt.pth"
 ]
-missing = [f for f in required_files if not os.path.exists(os.path.join(cmd_args.model_dir, f))]
-if missing:
-    print(
-        f"Model directory {cmd_args.model_dir} is incomplete (missing: {', '.join(missing)}). "
-        "Downloading IndexTTS-2 model..."
-    )
-    from indextts.utils.model_download import snapshot_download
-    try:
-        snapshot_download("IndexTeam/IndexTTS-2", local_dir=cmd_args.model_dir)
-    except Exception as e:
-        print(f"Failed to download model to {cmd_args.model_dir}: {e}")
-        sys.exit(1)
+
+if cmd_args.vllm:
+    # vLLM mode: check for converted HF format weights in checkpoints/gpt/
+    required_files = required_files_base.copy()
+    missing = [f for f in required_files if not os.path.exists(os.path.join(cmd_args.model_dir, f))]
+    
+    # Check config.json exists
+    gpt_config = os.path.join(cmd_args.model_dir, "gpt", "config.json")
+    if not os.path.exists(gpt_config):
+        missing.append("gpt/config.json")
+    
+    # Accept EITHER model.safetensors OR pytorch_model.bin (your conversion produced .bin)
+    gpt_weight_safetensors = os.path.join(cmd_args.model_dir, "gpt", "model.safetensors")
+    gpt_weight_bin = os.path.join(cmd_args.model_dir, "gpt", "pytorch_model.bin")
+    
+    if not os.path.exists(gpt_weight_safetensors) and not os.path.exists(gpt_weight_bin):
+        missing.append("gpt/model.safetensors OR gpt/pytorch_model.bin")
+    
+    if missing:
+        has_pth = os.path.exists(os.path.join(cmd_args.model_dir, "gpt.pth"))
+        if has_pth and any("gpt/" in str(f) for f in missing):
+            print(
+                f"[vLLM] ERROR: Found gpt.pth but missing converted HF format files: {missing}\n"
+                f"[vLLM] Please run the conversion first:\n"
+                f"[vLLM]   bash convert_hf_format.sh {cmd_args.model_dir}\n"
+                f"[vLLM] Or run without --vllm to use original gpt.pth."
+            )
+        else:
+            print(
+                f"[vLLM] Model directory {cmd_args.model_dir} is incomplete (missing: {', '.join(missing)}). "
+                "Downloading IndexTTS-2 model..."
+            )
+            from indextts.utils.model_download import snapshot_download
+            try:
+                snapshot_download("IndexTeam/IndexTTS-2", local_dir=cmd_args.model_dir)
+            except Exception as e:
+                print(f"Failed to download model to {cmd_args.model_dir}: {e}")
+                sys.exit(1)
+        
+        # Re-check after potential download
+        missing = [f for f in required_files if not os.path.exists(os.path.join(cmd_args.model_dir, f))]
+        if not os.path.exists(gpt_config):
+            missing.append("gpt/config.json")
+        if not os.path.exists(gpt_weight_safetensors) and not os.path.exists(gpt_weight_bin):
+            missing.append("gpt/model.safetensors OR gpt/pytorch_model.bin")
+        
+        if missing:
+            print(f"Model directory still incomplete (missing: {', '.join(missing)}). Please check manually.")
+            sys.exit(1)
+    
+    gpt_weight_file = "model.safetensors" if os.path.exists(gpt_weight_safetensors) else "pytorch_model.bin"
+    print(f"[vLLM] ✅ Converted GPT weights found at: {os.path.join(cmd_args.model_dir, 'gpt', gpt_weight_file)}")
+    print(f"[vLLM] GPU memory utilization: {cmd_args.gpu_memory_utilization}")
+else:
+    # Standard mode: check for original gpt.pth
+    required_files = required_files_base + ["gpt.pth"]
     missing = [f for f in required_files if not os.path.exists(os.path.join(cmd_args.model_dir, f))]
     if missing:
-        print(f"Failed to download model to {cmd_args.model_dir} (still missing: {', '.join(missing)}). Please download it manually.")
-        sys.exit(1)
-    print("Model downloaded successfully.")
+        print(
+            f"Model directory {cmd_args.model_dir} is incomplete (missing: {', '.join(missing)}). "
+            "Downloading IndexTTS-2 model..."
+        )
+        from indextts.utils.model_download import snapshot_download
+        try:
+            snapshot_download("IndexTeam/IndexTTS-2", local_dir=cmd_args.model_dir)
+        except Exception as e:
+            print(f"Failed to download model to {cmd_args.model_dir}: {e}")
+            sys.exit(1)
+        missing = [f for f in required_files if not os.path.exists(os.path.join(cmd_args.model_dir, f))]
+        if missing:
+            print(f"Failed to download model to {cmd_args.model_dir} (still missing: {', '.join(missing)}). Please download it manually.")
+            sys.exit(1)
+        print("Model downloaded successfully.")
 
 from indextts.utils.model_download import ensure_config_available
 try:
@@ -84,8 +132,11 @@ except Exception as e:
 
 import gradio as gr
 
-from indextts.infer_v2 import IndexTTS2
-
+if cmd_args.vllm:
+    from indextts.infer_vllm_v2 import IndexTTS2
+else:
+    from indextts.infer_v2 import IndexTTS2
+    
 from indextts.utils.examples_downloader import ensure_examples_available
 from indextts.utils.presets import list_presets, save_preset, load_preset, delete_preset
 from tools.i18n.i18n import I18nAuto
@@ -96,229 +147,41 @@ MODE = 'local'
 ensure_examples_available()
 
 # ── IndexTTS2 initialization ──────────────────────────────────────────────────
-tts = IndexTTS2(
-    model_dir=cmd_args.model_dir,
-    cfg_path=os.path.join(cmd_args.model_dir, "config.yaml"),
-    use_fp16=cmd_args.fp16,
-    use_deepspeed=cmd_args.deepspeed,
-    use_cuda_kernel=cmd_args.cuda_kernel,
-)
-
-print(f"[WebUI] Standard PyTorch mode.")
-
-# ---------------------------------------------------------------------------
-# NOTE ON THE ACTUAL ROOT CAUSE (confirmed via indextts/infer_v2.py source,
-# lines 549-551):
-#
-#   estimated_max = (text_tokens.shape[1] * 15) + 200
-#   dynamic_max_mel_tokens = max(100, min(max_mel_tokens, estimated_max))
-#
-# This dynamic per-segment mel-token budget SILENTLY OVERRIDES the UI's
-# max_mel_tokens setting downward for any segment shorter than ~87 text
-# tokens (nearly every SRT line). The "15 mel-tokens per text-token"
-# heuristic was evidently tuned for the base model's training languages
-# and is too tight for Amharic's morphologically dense subword tokens,
-# causing GPT generation to be forcibly cut off before reaching its
-# natural end-of-speech token on some segments (confirmed directly via a
-# RuntimeWarning fired by the vendor code at generation time) -- this is
-# the actual mechanism behind "some segments perfect, some inconsistent",
-# not concurrency, caching, decoding strategy, or reference-audio cropping
-# (all separately tested and ruled out).
-#
-# THE PRIMARY FIX is a source patch to indextts/infer_v2.py itself:
-#   estimated_max = (text_tokens.shape[1] * 30) + 400
-# (roughly doubling headroom). Apply that patch to your local checkout.
-#
-# The code below (infer_with_truncation_detection) is a DEFENSE-IN-DEPTH
-# safety net on top of that source patch: it detects that specific
-# RuntimeWarning if it still fires on any outlier segment, and forces an
-# automatic retry with a new seed through the existing QA retry loop,
-# rather than silently shipping a truncated segment.
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# tts is a SINGLE GLOBAL SINGLETON shared by every request that hits this
-# Gradio app, carrying mutable cross-call conditioning cache state. The app
-# uses demo.queue(default_concurrency_limit=20), allowing up to 20 concurrent
-# requests against this SAME object. global_infer_lock serializes access.
-# Verified via logs to correctly serialize every call (clean
-# Acquire -> ... -> Release, no interleaving) -- kept as a correct safety
-# net for the documented concurrency model, even though concurrency has
-# been separately ruled out as the cause of the voice-drift symptom.
-# ---------------------------------------------------------------------------
-global_infer_lock = threading.Lock()
-
-try:
-    _INFER_SIGNATURE = inspect.signature(tts.infer)
-    _INFER_PARAMS = _INFER_SIGNATURE.parameters
-    _INFER_NAMED_PARAMS = set(
-        name for name, p in _INFER_PARAMS.items()
-        if p.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+if cmd_args.vllm:
+    tts = IndexTTS2(
+        model_dir=cmd_args.model_dir,
+        is_fp16=cmd_args.fp16,
+        gpu_memory_utilization=cmd_args.gpu_memory_utilization,
+        qwenemo_gpu_memory_utilization=cmd_args.qwenemo_gpu_memory_utilization,
     )
-    _INFER_HAS_VAR_KEYWORD = any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in _INFER_PARAMS.values()
-    )
-    print("=" * 70)
-    print("[Introspection] Verified tts.infer() signature (ground truth):")
-    print(f"  {_INFER_SIGNATURE}")
-    print(f"[Introspection] Explicitly named parameters: {sorted(_INFER_NAMED_PARAMS)}")
-    print(f"[Introspection] Accepts arbitrary extra kwargs (**generation_kwargs): {_INFER_HAS_VAR_KEYWORD}")
-    print("=" * 70)
-except Exception as e:
-    print(f"[Introspection] WARNING: Could not introspect tts.infer signature: {e}")
-    _INFER_NAMED_PARAMS = None
-    _INFER_HAS_VAR_KEYWORD = True
-
-_TTS_CACHE_ATTRS = [a for a in vars(tts).keys() if a.lower().startswith("cache")]
-if _TTS_CACHE_ATTRS:
-    print(f"[Introspection] Detected SHARED mutable conditioning cache attributes on the tts singleton: {_TTS_CACHE_ATTRS}")
-    print("[Introspection] These are now protected by global_infer_lock during every tts.infer() call.")
 else:
-    print("[Introspection] No cache-like attributes detected on tts instance.")
-
-
-def _cache_fingerprint():
-    """Diagnostic only (verbose mode): hash of cache_* tensors, confirmed
-    stable/unmutated across segments in prior testing."""
-    import hashlib
-    parts = {}
-    for attr in _TTS_CACHE_ATTRS:
-        v = getattr(tts, attr, None)
-        try:
-            if torch.is_tensor(v):
-                parts[attr] = hashlib.md5(v.detach().cpu().numpy().tobytes()).hexdigest()[:10]
-            elif v is None:
-                parts[attr] = "None"
-            else:
-                parts[attr] = hashlib.md5(str(v).encode("utf-8", errors="ignore")).hexdigest()[:10]
-        except Exception as e:
-            parts[attr] = f"<err:{e}>"
-    return parts
-
-
-def safe_tts_infer(**kwargs):
-    """
-    Calls tts.infer() using its verified real signature, serializing ALL
-    access to the shared tts singleton via global_infer_lock.
-    """
-    if _INFER_NAMED_PARAMS is not None and not _INFER_HAS_VAR_KEYWORD:
-        filtered = {}
-        dropped = []
-        for k, v in kwargs.items():
-            if k in _INFER_NAMED_PARAMS:
-                filtered[k] = v
-            else:
-                dropped.append(k)
-        if dropped:
-            print(f"[safe_tts_infer] WARNING: Dropped unsupported kwargs (no **kwargs catch-all found): {dropped}")
-        call_kwargs = filtered
-    else:
-        call_kwargs = kwargs
-
-    if cmd_args.verbose:
-        print(f"[safe_tts_infer] Acquiring global_infer_lock for call with text: {str(call_kwargs.get('text',''))[:60]}...")
-
-    with global_infer_lock:
-        if cmd_args.verbose:
-            print(f"[safe_tts_infer] Lock acquired. Calling tts.infer() with kwargs: { {k: v for k, v in call_kwargs.items() if k != 'spk_audio_prompt'} }")
-        result = tts.infer(**call_kwargs)
-        if cmd_args.verbose:
-            print(f"[safe_tts_infer] tts.infer() completed. Releasing global_infer_lock.")
-            print(f"[safe_tts_infer] Post-call cache fingerprint: {_cache_fingerprint()}")
-    return result
-
-
-# === Truncation detection (defense-in-depth on top of the source patch) ===
-# Confirmed exact vendor warning text (indextts/infer_v2.py ~line 591):
-#   "generation stopped due to exceeding dynamic `max_mel_tokens` (...).
-#    Input text tokens: .... Consider reducing
-#    `max_text_tokens_per_segment`(...)."
-# This fires via warnings.warn(...) whenever GPT decoding is forcibly cut
-# off before reaching its natural end-of-speech token, due to the internal
-# dynamic_max_mel_tokens budget (see note above). This is DIRECT evidence
-# of an incomplete/corrupted generation -- not inferred, not guessed.
-# =============================================================================
-_TRUNCATION_WARNING_MARKERS = ("exceeding dynamic", "max_mel_tokens")
-
-def infer_with_truncation_detection(**kwargs):
-    """
-    Wraps safe_tts_infer() while capturing Python warnings, specifically
-    watching for the vendor's dynamic-max-mel-tokens truncation warning.
-    Returns (result, was_truncated: bool, warning_text: str or None).
-    """
-    with warnings_module.catch_warnings(record=True) as caught:
-        warnings_module.simplefilter("always")
-        result = safe_tts_infer(**kwargs)
-        truncation_warning = None
-        for w in caught:
-            msg = str(w.message)
-            if all(marker in msg for marker in _TRUNCATION_WARNING_MARKERS):
-                truncation_warning = msg
-                break
-    return result, (truncation_warning is not None), truncation_warning
-
-
-def build_generation_kwargs(do_sample, top_p, top_k, temperature,
-                             length_penalty, num_beams, repetition_penalty,
-                             max_mel_tokens, diffusion_steps=32):
-    """No decoding-strategy override. do_sample+num_beams>1 (beam_sample)
-    was tested and confirmed BENEFICIAL for this finetune -- it acts as a
-    built-in best-of-N candidate filter by cumulative log-probability.
-    Forcing num_beams=1 was tested and made output measurably worse."""
-    return {
-        "do_sample": bool(do_sample),
-        "top_p": float(top_p),
-        "top_k": int(top_k) if int(top_k) > 0 else None,
-        "temperature": float(temperature),
-        "length_penalty": float(length_penalty),
-        "num_beams": int(num_beams),
-        "repetition_penalty": float(repetition_penalty),
-        "max_mel_tokens": int(max_mel_tokens),
-        "diffusion_steps": int(diffusion_steps or 32),
-    }
-
-
-# === Reference audio pre-trim (kept from prior fix; harmless/beneficial
-# even though the truncation-cropping hypothesis was separately ruled out
-# by your grep results -- this still guarantees byte-identical reference
-# conditioning across all SRT segments for any file >15s). ==================
-_REF_AUDIO_MAX_DURATION_SEC = 15.0
-
-def _prepare_fixed_reference_audio(path, out_dir, max_duration_sec=_REF_AUDIO_MAX_DURATION_SEC):
-    if not path or not os.path.exists(path):
-        return path
-    try:
-        y, sr = librosa.load(path, sr=None)
-    except Exception as e:
-        print(f">> WARNING: could not pre-check reference audio '{path}' for length ({e}); leaving as-is.")
-        return path
-    max_samples = int(max_duration_sec * sr)
-    if len(y) <= max_samples:
-        return path
-
-    y_fixed = y[:max_samples]
-    os.makedirs(out_dir, exist_ok=True)
-    fixed_path = os.path.join(out_dir, f"_fixed_ref_{os.path.basename(path)}")
-    if not fixed_path.lower().endswith(".wav"):
-        fixed_path += ".wav"
-    sf.write(fixed_path, y_fixed, sr)
-    print(
-        f">> Reference audio '{os.path.basename(path)}' is {len(y)/sr:.2f}s, exceeding the model's "
-        f"{max_duration_sec:.1f}s cap. Pre-trimmed ONCE to a FIXED {max_duration_sec:.1f}s window at "
-        f"'{fixed_path}' so every SRT segment conditions on identical reference bytes."
+    tts = IndexTTS2(
+        model_dir=cmd_args.model_dir,
+        cfg_path=os.path.join(cmd_args.model_dir, "config.yaml"),
+        use_fp16=cmd_args.fp16,
+        use_deepspeed=cmd_args.deepspeed,
+        use_cuda_kernel=cmd_args.cuda_kernel,
     )
-    return fixed_path
-# ============================================================================
 
+if cmd_args.vllm:
+    print(f"")
+    print(f"╔══════════════════════════════════════════════════╗")
+    print(f"║  🚀 vLLM ACCELERATION ACTIVE                     ║")
+    print(f"║  GPT model: checkpoints/gpt/{gpt_weight_file:20s} ║")
+    print(f"║  VRAM pool: {cmd_args.gpu_memory_utilization:.0%} of available GPU memory         ║")
+    print(f"╚══════════════════════════════════════════════════╝")
+    print(f"")
+else:
+    print(f"[WebUI] Standard PyTorch mode (no vLLM). Use --vllm to enable acceleration.")
 
 LANGUAGES = {
-    "Chinese": "zh_CN",
+    "中文": "zh_CN",
     "English": "en_US"
 }
-EMO_CHOICES_ALL = [i18n("Same as voice reference audio"),
-                i18n("Use emotion reference audio"),
-                i18n("Use emotion vector control"),
-                i18n("Use emotion description text control")]
+EMO_CHOICES_ALL = [i18n("与音色参考音频相同"),
+                i18n("使用情感参考音频"),
+                i18n("使用情感向量控制"),
+                i18n("使用情感描述文本控制")]
 EMO_CHOICES_OFFICIAL = EMO_CHOICES_ALL[:-1]
 
 os.makedirs("outputs/tasks",exist_ok=True)
@@ -360,8 +223,8 @@ def get_example_cases(include_experimental = False):
 
 def format_glossary_markdown():
     if not tts.normalizer.term_glossary:
-        return i18n("No terms yet")
-    lines = [f"| {i18n('Term')} | {i18n('Chinese Reading')} | {i18n('English Reading')} |"]
+        return i18n("暂无术语")
+    lines = [f"| {i18n('术语')} | {i18n('中文读法')} | {i18n('英文读法')} |"]
     lines.append("|---|---|---|")
     for term, reading in tts.normalizer.term_glossary.items():
         zh = reading.get("zh", "") if isinstance(reading, dict) else reading
@@ -392,7 +255,6 @@ def parse_srt_file(file_path):
     segments = []
     for match in pattern.findall(content):
         text = re.sub(r'<[^>]+>', '', match[3].strip()).replace('\n', ' ').strip()
-        text = re.sub(r'\s+', ' ', text)
         if not text:
             continue
         segments.append({
@@ -545,291 +407,71 @@ def trim_audio_wav(file_path, top_db=30, margin_ms=80, max_internal_silence_ms=6
         print(f">> Failed to process audio {file_path}: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Audio Quality Gate
-# ---------------------------------------------------------------------------
+# ── Conditional gen_srt (async for vLLM, sync for non-vLLM) ───────────────────
 
-def evaluate_audio_quality(file_path, text, min_chars_per_sec=2.0, max_chars_per_sec=25.0):
-    try:
-        y, sr = librosa.load(file_path, sr=None)
-    except Exception as e:
-        return False, f"failed to load audio for QA: {e}"
-
-    if len(y) == 0:
-        return False, "empty audio file"
-
-    duration = len(y) / sr
-    rms = float(np.sqrt(np.mean(y.astype(np.float64) ** 2)))
-
-    text_len = max(1, len(text.strip()))
-    expected_min_duration = text_len / max_chars_per_sec
-    expected_max_duration = text_len / min_chars_per_sec
-
-    if rms < 0.0015:
-        return False, f"near-total silence detected (rms={rms:.5f})"
-
-    clip_ratio = float(np.mean(np.abs(y) > 0.995))
-    if clip_ratio > 0.02:
-        return False, f"excessive clipping detected (clip_ratio={clip_ratio:.3f})"
-
-    if duration < expected_min_duration * 0.5:
-        return False, f"audio drastically shorter than expected for text length (got {duration:.2f}s, expected >= {expected_min_duration*0.5:.2f}s)"
-
-    if duration > expected_max_duration * 1.8:
-        return False, f"audio drastically longer than expected for text length (got {duration:.2f}s, expected <= {expected_max_duration*1.8:.2f}s)"
-
-    return True, "ok"
-
-
-# ── SRT master assembly + background music ───────────────────
-
-def _srt_time_to_seconds(time_str):
-    """'00:01:23,456' -> 83.456 seconds. Returns 0.0 on any parse failure."""
-    try:
-        parts = time_str.replace(',', '.').split(':')
-        return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-    except Exception:
-        return 0.0
-
-
-def _assemble_srt_master(seg_records, sr=22050, gap_pad_sec=0.0):
-    """Build ONE continuous mono track from per-segment wavs, placing each
-    segment at its real SRT start time so the assembled voice track matches
-    the subtitle timeline. This is the correct base for a continuous music
-    bed (per-segment beds would restart jarringly at every cut).
-
-    seg_records: list of dicts with keys 'path' (wav on disk, may be None if
-                 the segment failed) and 'start'/'end' (SRT time strings).
-    gap_pad_sec: extra silent tail appended after the last segment.
-
-    Returns (master[np.float32 mono], sr). If no segment audio is available,
-    returns a short silence buffer.
-    Timeline strategy: honor SRT start times, but never overlap — if a
-    segment's audio would run past the next segment's start, segments are
-    laid back-to-back from the running write cursor instead (dubbing-safe:
-    no speech is ever clipped or overlapped).
-    """
-    loaded = []
-    for rec in seg_records:
-        p = rec.get("path")
-        if not p or not os.path.exists(p):
-            loaded.append((rec, None))
-            continue
-        try:
-            y, s = librosa.load(p, sr=sr, mono=True)
-            loaded.append((rec, y.astype(np.float32)))
-        except Exception:
-            loaded.append((rec, None))
-
-    # Determine total length: max of (last SRT end, running back-to-back end).
-    cursor = 0  # samples — running write position (prevents overlap)
-    placements = []  # (start_sample, audio)
-    for rec, y in loaded:
-        if y is None:
-            continue
-        srt_start = int(round(_srt_time_to_seconds(rec.get("start", "")) * sr))
-        start = max(cursor, srt_start)
-        placements.append((start, y))
-        cursor = start + len(y)
-
-    if not placements:
-        return np.zeros(int(sr * 0.5), dtype=np.float32), sr
-
-    total = cursor + int(round(gap_pad_sec * sr))
-    master = np.zeros(total, dtype=np.float32)
-    for start, y in placements:
-        end = start + len(y)
-        if end > len(master):  # safety, should not trigger
-            master = np.concatenate([master, np.zeros(end - len(master), dtype=np.float32)])
-        master[start:end] += y
-
-    # guard against summed peaks > 1 (segments never overlap, but be safe)
-    peak = float(np.max(np.abs(master))) if master.size else 0.0
-    if peak > 0.999:
-        master = master * (0.999 / peak)
-    return master, sr
-
-
-def _maybe_add_bg_music_to_master(master, sr, vec, emo_text, music_params, seed=None):
-    """Layer a single continuous, ducked music bed under an assembled SRT
-    master track. POST-PROCESSING ONLY — never touches TTS inference. Any
-    failure returns the dry master unchanged (with a warning).
-
-    Returns (mixed_or_dry[np.float32 mono], sr).
-    """
-    if not music_params or not music_params.get("enable"):
-        return master, sr
-    try:
-        import audio_bed
-        import music_source as _ms
-
-        prompt = _ms.emotion_to_prompt(
-            emo_vector=vec, emo_text=emo_text,
-            extra=music_params.get("prompt_extra") or None,
-        )
-        dur = max(1.0, len(master) / float(sr))
-
-        source_kind = music_params.get("source", "musicgen")
-        if source_kind in ("library", "files", "folder"):
-            src = _ms.make_source(
-                "library",
-                library_dir=music_params.get("library_dir", "music_library"))
-            music, sr_m = src.generate(prompt, dur, seed=seed,
-                                       mood=music_params.get("mood"))
+if cmd_args.vllm:
+    async def gen_srt(prompt, srt_file,
+                emo_control_method, emo_ref_path, emo_weight,
+                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                emo_text, emo_random,
+                max_text_tokens_per_segment=120,
+                *args, progress=gr.Progress()):
+        
+        if not prompt:
+            gr.Warning(i18n("请先在\"音频生成\"选项卡中上传参考音频"))
+            return gr.update(visible=False), i18n("错误：缺少参考音频")
+        if not srt_file:
+            gr.Warning(i18n("请上传SRT文件"))
+            return gr.update(visible=False), i18n("错误：缺少SRT文件")
+        
+        srt_path = srt_file.name if hasattr(srt_file, 'name') else srt_file
+        segments = parse_srt_file(srt_path)
+        
+        if not segments:
+            gr.Warning(i18n("SRT解析失败或为空"))
+            return gr.update(visible=False), i18n("错误：SRT解析失败")
+        
+        do_sample, top_p, top_k, temperature, \
+            length_penalty, num_beams, repetition_penalty, max_mel_tokens, trim_silence_val = args
+            
+        kwargs = {
+            "do_sample": bool(do_sample),
+            "top_p": float(top_p),
+            "top_k": int(top_k) if int(top_k) > 0 else None,
+            "temperature": float(temperature),
+            "length_penalty": float(length_penalty),
+            "num_beams": num_beams,
+            "repetition_penalty": float(repetition_penalty),
+            "max_mel_tokens": int(max_mel_tokens),
+        }
+        
+        if type(emo_control_method) is not int:
+            emo_control_method = emo_control_method.value
+        if emo_control_method == 0:
+            emo_ref_path = None
+        if emo_control_method == 2:
+            vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+            vec = tts.normalize_emo_vec(vec, apply_bias=True)
         else:
-            src = _ms.make_source(
-                "musicgen",
-                device=("cuda" if torch.cuda.is_available() else "cpu"))
-            music, sr_m = src.generate(prompt, dur, seed=seed)
+            vec = None
 
-        mix, sr_out = audio_bed.mix_voice_with_bed(
-            master, sr, music, sr_m,
-            music_db=float(music_params.get("volume_db", -18.0)),
-            duck_db=float(music_params.get("duck_db", -12.0)),
-        )
-        print(f">> SRT background music added: {prompt!r} ({dur:.1f}s)")
-        return mix, sr_out
-    except Exception as e:
-        gr.Warning(i18n("Background music failed; returning voice only.") + f" ({e})")
-        print(f">> SRT background music FAILED (voice preserved): {e}")
-        return master, sr
+        if emo_text == "":
+            emo_text = None
 
-
-# ── gen_srt and gen_single ───────────────────
-
-def _resolve_duration_kwargs(duration_mode_val, target_duration_seconds_val,
-                              target_semantic_tokens_val, srt_seconds=None):
-    """Translate the shared Duration Control UI into tts.infer() kwargs.
-
-    Returns {} for "Auto"/invalid/unsupported combinations (zero behavior
-    change - native pacing), otherwise {"use_speed": True, "target_dur":
-    <seconds float>}. The server (infer_v2.py) converts seconds -> mel tokens
-    at 50 tokens/sec and only applies it to single-segment text (longer lines
-    silently fall back to Auto with a warning).
-
-    srt_seconds: the segment's own (end - start) seconds, used only for
-    "Match SRT Duration" mode (SRT Batch tab). Ignored otherwise / in the
-    direct-text tab where it is passed as None, so "Match SRT Duration" there
-    harmlessly degrades to Auto.
-    """
-    mode = duration_mode_val or "Auto"
-    try:
-        if mode == "Match SRT Duration":
-            if srt_seconds and float(srt_seconds) > 0:
-                return {"use_speed": True, "target_dur": float(srt_seconds)}
-        elif mode == "Seconds":
-            if target_duration_seconds_val and float(target_duration_seconds_val) > 0:
-                return {"use_speed": True, "target_dur": float(target_duration_seconds_val)}
-        elif mode == "Tokens":
-            if target_semantic_tokens_val and int(target_semantic_tokens_val) > 0:
-                return {"use_speed": True, "target_dur": int(target_semantic_tokens_val) / 50.0}
-    except Exception as e:
-        print(f">> Duration control: ignoring invalid target ({e}); using Auto.")
-    return {}
-
-
-def gen_srt(prompt, srt_file,
-            emo_control_method, emo_ref_path, emo_weight,
-            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
-            emo_text, emo_random,
-            max_text_tokens_per_segment=120,
-            *args, progress=gr.Progress()):
-    
-    if not prompt:
-        gr.Warning(i18n("Please upload a reference audio in the \"Audio Generation\" tab first"))
-        return gr.update(visible=False), i18n("Error: Missing reference audio")
-    if not srt_file:
-        gr.Warning(i18n("Please upload an SRT file"))
-        return gr.update(visible=False), i18n("Error: Missing SRT file")
-    
-    srt_path = srt_file.name if hasattr(srt_file, 'name') else srt_file
-    segments = parse_srt_file(srt_path)
-    
-    if not segments:
-        gr.Warning(i18n("SRT parsing failed or empty"))
-        return gr.update(visible=False), i18n("Error: SRT parsing failed")
-    
-    do_sample, top_p, top_k, temperature, \
-        length_penalty, num_beams, repetition_penalty, max_mel_tokens, trim_silence_val, \
-        max_retries_val, base_seed_val, diffusion_steps_val, \
-        bg_enable, bg_source, bg_prompt_extra, bg_volume_db, bg_duck_db, \
-        sfx_enable, sfx_source, sfx_prompt_extra, sfx_volume_db, sfx_duck_db, \
-        duration_mode_val, target_duration_seconds_val, target_semantic_tokens_val = args
-    # Background music + ambience (AFX) for SRT batch: after all segments are
-    # generated we assemble a timeline-accurate master track and lay a
-    # continuous ducked music bed and/or ambience bed under it (see
-    # _assemble_srt_master / _maybe_add_bg_music_to_master). The mixed master is
-    # added to the ZIP alongside the raw segments. Pure post-processing — never
-    # touches TTS inference.
-
-    generation_kwargs = build_generation_kwargs(
-        do_sample, top_p, top_k, temperature,
-        length_penalty, num_beams, repetition_penalty, max_mel_tokens,
-        diffusion_steps_val
-    )
-
-    if type(emo_control_method) is not int:
-        emo_control_method = emo_control_method.value
-
-    out_dir = os.path.join("outputs", "tasks", f"srt_{int(time.time())}")
-    os.makedirs(out_dir, exist_ok=True)
-
-    prompt = _prepare_fixed_reference_audio(prompt, out_dir)
-
-    if emo_control_method == 0:
-        emo_ref_path = prompt
-    elif emo_ref_path:
-        emo_ref_path = _prepare_fixed_reference_audio(emo_ref_path, out_dir)
-
-    if emo_control_method == 2:
-        vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-        vec = tts.normalize_emo_vec(vec, apply_bias=True)
-    else:
-        vec = None
-
-    if emo_text == "":
-        emo_text = None
-
-    tts.gr_progress = progress
-    total = len(segments)
-    success_count = 0
-    max_retries = int(max_retries_val)
-    base_seed = int(base_seed_val)
-    
-    progress(0, desc=f"Start generating SRT dubbing (total {total} segments)...")
-
-    qa_log_lines = []
-    seg_records = []  # for optional background-music master assembly
-
-    for i, seg in enumerate(segments):
-        progress((i + 1) / total, desc=f"Generating segment {i+1}/{total}...")
-        out_path = os.path.join(out_dir, f"segment-{seg['index']:04d}.wav")
-
-        segment_ok = False
-        last_reason = ""
-        # Duration control (shared UI): "Match SRT Duration" derives the target
-        # from this segment's own subtitle timing; "Seconds"/"Tokens" use the
-        # fixed UI value; "Auto" -> {} (native pacing, no behavior change).
-        srt_seconds = _srt_time_to_seconds(seg['end']) - _srt_time_to_seconds(seg['start'])
-        duration_kwargs = _resolve_duration_kwargs(
-            duration_mode_val, target_duration_seconds_val,
-            target_semantic_tokens_val, srt_seconds=srt_seconds)
-        for attempt in range(max_retries + 1):
-            # Use ONE constant seed for every segment AND every attempt.
-            # NOT base_seed + (i * 1000): per-segment seed variation makes each
-            # segment's timbre drift independently. A single constant seed
-            # across all segments matches the 100%-consistent direct webui path.
-            seed_for_attempt = base_seed
-
+        out_dir = os.path.join("outputs", "tasks", f"srt_{int(time.time())}")
+        os.makedirs(out_dir, exist_ok=True)
+        
+        tts.gr_progress = progress
+        total = len(segments)
+        success_count = 0
+        
+        progress(0, desc=f"开始生成 SRT 配音 (共 {total} 段)...")
+        
+        for i, seg in enumerate(segments):
+            progress((i + 1) / total, desc=f"生成第 {i+1}/{total} 段...")
+            out_path = os.path.join(out_dir, f"segment-{seg['index']:04d}.wav")
             try:
-                torch.manual_seed(seed_for_attempt)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seed_for_attempt)
-
-                if cmd_args.verbose:
-                    print(f">> Segment {seg['index']} attempt {attempt+1}: seed={seed_for_attempt} (deterministic)")
-
-                _, was_truncated, trunc_msg = infer_with_truncation_detection(
+                await tts.infer(
                     spk_audio_prompt=prompt,
                     text=seg['text'],
                     output_path=out_path,
@@ -840,317 +482,111 @@ def gen_srt(prompt, srt_file,
                     emo_text=emo_text,
                     use_random=emo_random,
                     verbose=cmd_args.verbose,
-                    max_text_tokens_per_segment=int(max_text_tokens_per_segment),
-                    seed=seed_for_attempt,  # Pass seed to infer
-                    **duration_kwargs,
-                    **generation_kwargs
+                    max_text_tokens_per_sentence=int(max_text_tokens_per_segment),
+                    **kwargs
                 )
-
-                if was_truncated:
-                    last_reason = f"GPT generation forcibly truncated by internal dynamic max_mel_tokens cap: {trunc_msg}"
-                    print(f">> Segment {seg['index']} attempt {attempt+1}/{max_retries+1}: {last_reason} Retrying with new seed...")
-                    continue
-
-                is_ok, reason = evaluate_audio_quality(out_path, seg['text'])
-                last_reason = reason
-                if is_ok:
-                    segment_ok = True
-                    break
-                else:
-                    print(f">> Segment {seg['index']} attempt {attempt+1}/{max_retries+1} failed QA check: {reason}. Retrying with new seed...")
+                if trim_silence_val:
+                    # ONLY CHANGE THIS LINE IN THE ASYNC FUNCTION
+                    await asyncio.to_thread(trim_audio_wav, out_path)
+                success_count += 1
             except Exception as e:
-                last_reason = str(e)
-                print(f"Error generating segment {seg['index']} (attempt {attempt+1}): {e}")
-
-        if segment_ok:
-            if trim_silence_val:
-                trim_audio_wav(out_path)
-            success_count += 1
-            seg_records.append({"path": out_path, "start": seg["start"], "end": seg["end"]})
+                print(f"Error generating segment {seg['index']}: {e}")
+                
+        if success_count == 0:
+            return gr.update(visible=False), i18n("所有片段生成失败，请检查日志")
+            
+        zip_path = os.path.join(out_dir, "dubbing_segments.zip")
+        with zipfile.ZipFile(zip_path, 'w') as z:
+            for f in sorted(os.listdir(out_dir)):
+                if f.endswith('.wav'):
+                    z.write(os.path.join(out_dir, f), arcname=f)
+                    
+        return gr.update(value=zip_path, visible=True), f"完成！成功生成 {success_count}/{total} 段。"
+else:
+    def gen_srt(prompt, srt_file,
+                emo_control_method, emo_ref_path, emo_weight,
+                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                emo_text, emo_random,
+                max_text_tokens_per_segment=120,
+                *args, progress=gr.Progress()):
+        
+        if not prompt:
+            gr.Warning(i18n("请先在\"音频生成\"选项卡中上传参考音频"))
+            return gr.update(visible=False), i18n("错误：缺少参考音频")
+        if not srt_file:
+            gr.Warning(i18n("请上传SRT文件"))
+            return gr.update(visible=False), i18n("错误：缺少SRT文件")
+        
+        srt_path = srt_file.name if hasattr(srt_file, 'name') else srt_file
+        segments = parse_srt_file(srt_path)
+        
+        if not segments:
+            gr.Warning(i18n("SRT解析失败或为空"))
+            return gr.update(visible=False), i18n("错误：SRT解析失败")
+        
+        do_sample, top_p, top_k, temperature, \
+            length_penalty, num_beams, repetition_penalty, max_mel_tokens, trim_silence_val = args
+            
+        kwargs = {
+            "do_sample": bool(do_sample),
+            "top_p": float(top_p),
+            "top_k": int(top_k) if int(top_k) > 0 else None,
+            "temperature": float(temperature),
+            "length_penalty": float(length_penalty),
+            "num_beams": num_beams,
+            "repetition_penalty": float(repetition_penalty),
+            "max_mel_tokens": int(max_mel_tokens),
+        }
+        
+        if type(emo_control_method) is not int:
+            emo_control_method = emo_control_method.value
+        if emo_control_method == 0:
+            emo_ref_path = None
+        if emo_control_method == 2:
+            vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+            vec = tts.normalize_emo_vec(vec, apply_bias=True)
         else:
-            seg_records.append({"path": None, "start": seg["start"], "end": seg["end"]})
-            qa_log_lines.append(f"Segment {seg['index']}: FAILED after {max_retries+1} attempts ({last_reason})")
-            print(f">> Segment {seg['index']} permanently failed QA after {max_retries+1} attempts: {last_reason}")
+            vec = None
 
-    if success_count == 0:
-        return gr.update(visible=False), i18n("All segments failed to generate, please check logs")
+        if emo_text == "":
+            emo_text = None
 
-    # ── Optional: assemble a timeline master and lay a continuous music + ──
-    # ── ambience bed under it. Gated on bg_enable OR sfx_enable so default ──
-    # ── (both off) behavior is byte-for-byte unchanged. ──
-    music_note = ""
-    if bool(bg_enable) or bool(sfx_enable):
-        try:
-            master, m_sr = _assemble_srt_master(seg_records, sr=22050)
-            mixed, mix_sr = master, m_sr
-            applied = []
-
-            if bool(bg_enable):
-                mixed, mix_sr = _maybe_add_bg_music_to_master(
-                    mixed, mix_sr, vec, emo_text,
-                    {
-                        "enable": True,
-                        "source": bg_source,
-                        "prompt_extra": bg_prompt_extra,
-                        "volume_db": bg_volume_db,
-                        "duck_db": bg_duck_db,
-                    },
-                    seed=base_seed,
+        out_dir = os.path.join("outputs", "tasks", f"srt_{int(time.time())}")
+        os.makedirs(out_dir, exist_ok=True)
+        
+        tts.gr_progress = progress
+        total = len(segments)
+        success_count = 0
+        
+        progress(0, desc=f"开始生成 SRT 配音 (共 {total} 段)...")
+        
+        for i, seg in enumerate(segments):
+            progress((i + 1) / total, desc=f"生成第 {i+1}/{total} 段...")
+            out_path = os.path.join(out_dir, f"segment-{seg['index']:04d}.wav")
+            try:
+                tts.infer(
+                    spk_audio_prompt=prompt,
+                    text=seg['text'],
+                    output_path=out_path,
+                    # ...
                 )
-                if mixed is not master:
-                    applied.append("music")
-
-            if bool(sfx_enable):
-                before = mixed
-                mixed, mix_sr = _apply_ambience_layer(
-                    mixed, mix_sr, vec, emo_text,
-                    {
-                        "enable": True,
-                        "source": sfx_source,
-                        "prompt_extra": sfx_prompt_extra,
-                        "volume_db": sfx_volume_db,
-                        "duck_db": sfx_duck_db,
-                    },
-                    seed=base_seed,
-                )
-                if mixed is not before:
-                    applied.append("ambience")
-
-            # Always write the dry assembled master; write the mix if anything applied.
-            master_path = os.path.join(out_dir, "dubbing_master.wav")
-            import audio_bed as _ab
-            _ab.save_wav(master_path, master, m_sr)
-            if applied:
-                music_path = os.path.join(out_dir, "dubbing_master_music.wav")
-                _ab.save_wav(music_path, mixed, mix_sr)
-                music_note = " + timeline master with " + "+".join(applied)
-            else:
-                music_note = " + timeline master (audio layers unavailable, dry only)"
-        except Exception as e:
-            gr.Warning(i18n("Background music failed; returning voice only.") + f" ({e})")
-            print(f">> SRT master/music assembly FAILED (segments preserved): {e}")
-
-    zip_path = os.path.join(out_dir, "dubbing_segments.zip")
-    with zipfile.ZipFile(zip_path, 'w') as z:
-        for f in sorted(os.listdir(out_dir)):
-            if f.endswith('.wav'):
-                z.write(os.path.join(out_dir, f), arcname=f)
-        if qa_log_lines:
-            log_path = os.path.join(out_dir, "qa_failures.log")
-            with open(log_path, "w", encoding="utf-8") as lf:
-                lf.write("\n".join(qa_log_lines))
-            z.write(log_path, arcname="qa_failures.log")
-
-    status_msg = f"Done! Successfully generated {success_count}/{total} segments{music_note}."
-    if qa_log_lines:
-        status_msg += f" ({len(qa_log_lines)} segment(s) failed QA even after retries — see qa_failures.log in the ZIP)"
-
-    return gr.update(value=zip_path, visible=True), status_msg
-
-
-def _apply_ambience_layer(track, sr, vec, emo_text, sfx_params, seed=None):
-    """POST-PROCESSING ONLY. Layer a mood-matched ambience/SFX bed UNDER an
-    already-mixed track (voice, or voice+music). Uses the same ducking engine
-    as music. Any failure returns the track unchanged (with a warning).
-
-    sfx_params: dict with keys enable, source, prompt_extra, volume_db, duck_db.
-    Returns (track_or_mixed[np.float32], sr).
-    """
-    if not sfx_params or not sfx_params.get("enable"):
-        return track, sr
-    try:
-        import audio_bed
-        import music_source as _ms
-
-        prompt = _ms.emotion_to_sfx_prompt(
-            emo_vector=vec, emo_text=emo_text,
-            extra=sfx_params.get("prompt_extra") or None,
-        )
-        dur = max(1.0, len(track) / float(sr))
-
-        source_kind = sfx_params.get("source", "audiogen")
-        if source_kind in ("library", "files", "folder"):
-            src = _ms.make_source(
-                "library",
-                library_dir=sfx_params.get("library_dir", "sfx_library"))
-            sfx, sr_s = src.generate(prompt, dur, seed=seed,
-                                     mood=sfx_params.get("mood"))
-        elif source_kind in ("musicgen",):
-            src = _ms.make_source(
-                "musicgen",
-                device=("cuda" if torch.cuda.is_available() else "cpu"))
-            sfx, sr_s = src.generate(prompt, dur, seed=seed)
-        else:
-            src = _ms.make_source(
-                "audiogen",
-                device=("cuda" if torch.cuda.is_available() else "cpu"))
-            sfx, sr_s = src.generate(prompt, dur, seed=seed)
-
-        mix, sr_out = audio_bed.mix_voice_with_bed(
-            track, sr, sfx, sr_s,
-            music_db=float(sfx_params.get("volume_db", -24.0)),
-            duck_db=float(sfx_params.get("duck_db", -9.0)),
-            fade_in_sec=0.3,
-            fade_out_sec=0.3,   # tiny anti-click fade only
-            tail_sec=0.0,       # NEVER extend past the voice — mix length == voice length
-        )
-        print(f">> ambience/SFX added: {prompt!r} ({dur:.1f}s)")
-        return mix, sr_out
-    except Exception as e:
-        gr.Warning(i18n("Ambience/SFX failed; keeping previous audio.") + f" ({e})")
-        print(f">> ambience/SFX FAILED (audio preserved): {e}")
-        return track, sr
-
-
-def _maybe_add_bg_music(voice_path, vec, emo_text, music_params, seed=None,
-                        sfx_params=None):
-    """POST-PROCESSING ONLY. Layer a mood-matched music bed under an already-
-    generated voice wav. Never touches TTS inference. Any failure here is
-    swallowed with a warning so the voice output is always preserved.
-
-    music_params: dict with keys
-        enable (bool), source (str), prompt_extra (str),
-        volume_db (float), duck_db (float)
-    sfx_params: optional dict, same keys, for a mood-matched ambience/SFX bed
-        layered under the (voice or voice+music) result.
-    Returns the path to use (mixed file on success, original voice on any failure).
-    """
-    music_on = bool(music_params and music_params.get("enable"))
-    sfx_on = bool(sfx_params and sfx_params.get("enable"))
-    if not music_on and not sfx_on:
-        return voice_path
-    try:
-        import audio_bed
-        import music_source as _ms
-
-        voice, sr_v = audio_bed.load_wav(voice_path)
-        track, sr = voice, sr_v
-        did_something = False
-
-        # ---- music bed ----
-        if music_on:
-            prompt = _ms.emotion_to_prompt(
-                emo_vector=vec, emo_text=emo_text,
-                extra=music_params.get("prompt_extra") or None,
-            )
-            dur = max(1.0, len(track) / float(sr))
-            source_kind = music_params.get("source", "musicgen")
-            if source_kind in ("library", "files", "folder"):
-                src = _ms.make_source("library",
-                                      library_dir=music_params.get("library_dir", "music_library"))
-                music, sr_m = src.generate(prompt, dur, seed=seed,
-                                           mood=music_params.get("mood"))
-            else:
-                src = _ms.make_source("musicgen",
-                                      device=("cuda" if torch.cuda.is_available() else "cpu"))
-                music, sr_m = src.generate(prompt, dur, seed=seed)
-            track, sr = audio_bed.mix_voice_with_bed(
-                track, sr, music, sr_m,
-                music_db=float(music_params.get("volume_db", -18.0)),
-                duck_db=float(music_params.get("duck_db", -12.0)),
-            )
-            did_something = True
-            print(f">> background music added: {prompt!r}")
-
-        # ---- ambience / SFX bed (under voice+music) ----
-        if sfx_on:
-            track, sr = _apply_ambience_layer(track, sr, vec, emo_text, sfx_params, seed=seed)
-            did_something = True
-
-        if not did_something:
-            return voice_path
-        out = voice_path.rsplit(".", 1)[0] + "_music.wav"
-        audio_bed.save_wav(out, track, sr)
-        return out
-    except Exception as e:
-        gr.Warning(i18n("Background music failed; returning voice only.") + f" ({e})")
-        print(f">> background music FAILED (voice preserved): {e}")
-        return voice_path
-
-
-def gen_single(emo_control_method, prompt, text,
-               emo_ref_path, emo_weight,
-               vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
-               emo_text, emo_random,
-               max_text_tokens_per_segment=120,
-               *args, progress=gr.Progress()):
-    output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
-    tts.gr_progress = progress
-    do_sample, top_p, top_k, temperature, \
-        length_penalty, num_beams, repetition_penalty, max_mel_tokens, trim_silence_val, \
-        max_retries_val, base_seed_val, diffusion_steps_val, \
-        bg_enable, bg_source, bg_prompt_extra, bg_volume_db, bg_duck_db, \
-        sfx_enable, sfx_source, sfx_prompt_extra, sfx_volume_db, sfx_duck_db, \
-        duration_mode_val, target_duration_seconds_val, target_semantic_tokens_val = args
-
-    generation_kwargs = build_generation_kwargs(
-        do_sample, top_p, top_k, temperature,
-        length_penalty, num_beams, repetition_penalty, max_mel_tokens,
-        diffusion_steps_val
-    )
-
-    if type(emo_control_method) is not int:
-        emo_control_method = emo_control_method.value
-    if emo_control_method == 0:
-        emo_ref_path = prompt
-    if emo_control_method == 2:
-        vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-        vec = tts.normalize_emo_vec(vec, apply_bias=True)
-    else:
-        vec = None
-    if emo_text == "":
-        emo_text = None
-
-    base_seed = int(base_seed_val)
-    torch.manual_seed(base_seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(base_seed)
-
-    # Duration control (shared UI): no SRT timing available in this tab, so
-    # "Match SRT Duration" harmlessly degrades to Auto (native pacing).
-    duration_kwargs = _resolve_duration_kwargs(
-        duration_mode_val, target_duration_seconds_val,
-        target_semantic_tokens_val, srt_seconds=None)
-
-    _, was_truncated, trunc_msg = infer_with_truncation_detection(
-        spk_audio_prompt=prompt,
-        text=text,
-        output_path=output_path,
-        emo_audio_prompt=emo_ref_path,
-        emo_alpha=emo_weight,
-        emo_vector=vec,
-        use_emo_text=(emo_control_method==3),
-        emo_text=emo_text,
-        use_random=emo_random,
-        verbose=cmd_args.verbose,
-        max_text_tokens_per_segment=int(max_text_tokens_per_segment),
-        **duration_kwargs,
-        **generation_kwargs
-    )
-    if was_truncated:
-        gr.Warning(i18n("Generation was truncated by the model's internal length estimate; consider raising max_mel_tokens or applying the infer_v2.py source patch for this language.") + f" ({trunc_msg})")
-    if trim_silence_val:
-        trim_audio_wav(output_path)
-
-    final_path = _maybe_add_bg_music(
-        output_path, vec, emo_text,
-        {
-            "enable": bool(bg_enable),
-            "source": bg_source,
-            "prompt_extra": bg_prompt_extra,
-            "volume_db": bg_volume_db,
-            "duck_db": bg_duck_db,
-        },
-        seed=base_seed,
-        sfx_params={
-            "enable": bool(sfx_enable),
-            "source": sfx_source,
-            "prompt_extra": sfx_prompt_extra,
-            "volume_db": sfx_volume_db,
-            "duck_db": sfx_duck_db,
-        },
-    )
-    return gr.update(value=final_path, visible=True)
+                if trim_silence_val:
+                    # KEEP THIS ONE STANDARD (NO AWAIT)
+                    trim_audio_wav(out_path)
+                success_count += 1
+            except Exception as e:
+                print(f"Error generating segment {seg['index']}: {e}")
+                
+        if success_count == 0:
+            return gr.update(visible=False), i18n("所有片段生成失败，请检查日志")
+            
+        zip_path = os.path.join(out_dir, "dubbing_segments.zip")
+        with zipfile.ZipFile(zip_path, 'w') as z:
+            for f in sorted(os.listdir(out_dir)):
+                if f.endswith('.wav'):
+                    z.write(os.path.join(out_dir, f), arcname=f)
+                    
+        return gr.update(value=zip_path, visible=True), f"完成！成功生成 {success_count}/{total} 段。"
 
 
 # ---------------------------------------------------------------------------
@@ -1181,7 +617,7 @@ def _build_preset_data(
             "temperature": float(temperature) if temperature is not None else 0.8,
             "length_penalty": float(length_penalty) if length_penalty is not None else 0.0,
             "num_beams": int(num_beams) if num_beams is not None else 3,
-            "repetition_penalty": float(repetition_penalty) if repetition_penalty is not None else 2.0,
+            "repetition_penalty": float(repetition_penalty) if repetition_penalty is not None else 10.0,
             "max_mel_tokens": int(max_mel_tokens) if max_mel_tokens is not None else 1500,
             "max_text_tokens_per_segment": int(max_text_tokens_per_segment)
             if max_text_tokens_per_segment is not None else 120,
@@ -1199,7 +635,7 @@ def on_preset_save(
 ):
     name = name.strip() if name else ""
     if not name:
-        gr.Warning(i18n("Preset name cannot be empty"))
+        gr.Warning(i18n("预设名称不能为空"))
         return gr.update()
 
     data = _build_preset_data(
@@ -1214,10 +650,10 @@ def on_preset_save(
     existed = name in list_presets()
     try:
         save_preset(name, data, prompt_audio=prompt_audio, emo_audio=emo_ref_path)
-        msg = i18n("Preset name already exists, overwritten") if existed else i18n("Preset saved")
+        msg = i18n("预设名称已存在，已覆盖") if existed else i18n("预设已保存")
         gr.Info(msg, duration=2)
     except Exception as e:
-        gr.Error(f"{i18n('Failed to load preset')}: {e}")
+        gr.Error(f"{i18n('加载预设失败')}: {e}")
         return gr.update(), gr.update()
 
     choices = [""] + list_presets()
@@ -1233,7 +669,7 @@ def on_preset_load(name):
         return {}
     data = load_preset(name)
     if data is None:
-        gr.Warning(i18n("Preset does not exist"))
+        gr.Warning(i18n("预设不存在"))
         return {}
     try:
         emo_method = int(data.get("emo_control_method", 0))
@@ -1248,7 +684,7 @@ def on_preset_load(name):
             missing.append("emotion")
             emo_path = None
         if missing:
-            gr.Warning(i18n("Reference audio file missing, skipped"))
+            gr.Warning(i18n("参考音频文件缺失，已跳过"))
         emo_weight_value = data.get("emo_weight", 0.65)
         emo_vec = data.get("emo_vector", [0.0] * 8)
         emo_text_value = data.get("emo_text", "")
@@ -1281,25 +717,25 @@ def on_preset_load(name):
             temperature: gr.update(value=advanced.get("temperature", 0.8)),
             length_penalty: gr.update(value=advanced.get("length_penalty", 0.0)),
             num_beams: gr.update(value=advanced.get("num_beams", 3)),
-            repetition_penalty: gr.update(value=advanced.get("repetition_penalty", 2.0)),
+            repetition_penalty: gr.update(value=advanced.get("repetition_penalty", 10.0)),
             max_mel_tokens: gr.update(value=advanced.get("max_mel_tokens", 1500)),
             max_text_tokens_per_segment: gr.update(
                 value=advanced.get("max_text_tokens_per_segment", 120)
             ),
         }
     except Exception as e:
-        gr.Error(f"{i18n('Failed to load preset')}: {e}")
+        gr.Error(f"{i18n('加载预设失败')}: {e}")
         return {}
 
 
 def on_preset_delete(name):
     if not name:
-        gr.Warning(i18n("Please select a preset"))
+        gr.Warning(i18n("请选择预设"))
         return gr.update()
     if delete_preset(name):
-        gr.Info(i18n("Preset deleted"), duration=2)
+        gr.Info(i18n("预设已删除"), duration=2)
     else:
-        gr.Warning(i18n("Preset does not exist"))
+        gr.Warning(i18n("预设不存在"))
     choices = [""] + list_presets()
     has_presets = len(choices) > 1
     return (
@@ -1316,44 +752,44 @@ def update_delete_preset_button(preset_name):
 
 def format_preset_details(name):
     if not name:
-        return i18n("Please select a preset to manage")
+        return i18n("请选择要管理的预设")
     data = load_preset(name)
     if data is None:
-        return i18n("Preset does not exist")
+        return i18n("预设不存在")
     try:
         emo_method = int(data.get("emo_control_method", 0))
-        emo_label = EMO_CHOICES_ALL[emo_method] if 0 <= emo_method < len(EMO_CHOICES_ALL) else i18n("Unknown")
+        emo_label = EMO_CHOICES_ALL[emo_method] if 0 <= emo_method < len(EMO_CHOICES_ALL) else i18n("未知")
         emo_weight = data.get("emo_weight", 0.0)
         emo_vec = data.get("emo_vector", [0.0] * 8)
-        emo_text = data.get("emo_text", "") or i18n("None")
+        emo_text = data.get("emo_text", "") or i18n("无")
         emo_random = data.get("emo_random", False)
         advanced = data.get("advanced_params", {})
-        prompt_path = data.get("prompt_audio", "") or i18n("None")
-        emo_path = data.get("emo_audio", "") or i18n("None")
+        prompt_path = data.get("prompt_audio", "") or i18n("无")
+        emo_path = data.get("emo_audio", "") or i18n("无")
         lines = [
-            f"### {i18n('Preset Details')}: {name}",
+            f"### {i18n('预设详情')}: {name}",
             "",
-            f"| {i18n('Attribute')} | {i18n('Value')} |",
+            f"| {i18n('属性')} | {i18n('值')} |",
             "|---|---|",
-            f"| {i18n('Name')} | {name} |",
-            f"| {i18n('Emotion Control Method')} | {emo_label} |",
-            f"| {i18n('Emotion Weight')} | {emo_weight} |",
-            f"| {i18n('Emotion Random Sampling')} | {'On' if emo_random else 'Off'} |",
-            f"| {i18n('Voice Audio')} | `{prompt_path}` |",
-            f"| {i18n('Emotion Audio')} | `{emo_path}` |",
+            f"| {i18n('名称')} | {name} |",
+            f"| {i18n('情感控制方式')} | {emo_label} |",
+            f"| {i18n('情感权重')} | {emo_weight} |",
+            f"| {i18n('情感随机采样')} | {'On' if emo_random else 'Off'} |",
+            f"| {i18n('音色音频')} | `{prompt_path}` |",
+            f"| {i18n('情感音频')} | `{emo_path}` |",
             "",
-            f"**{i18n('Emotion Vector')}**: `[{', '.join(str(round(v, 2)) for v in emo_vec)}]`",
+            f"**{i18n('情感向量')}**: `[{', '.join(str(round(v, 2)) for v in emo_vec)}]`",
             "",
-            f"**{i18n('Emotion Description Text')}**: {emo_text}",
+            f"**{i18n('情感描述文本')}**: {emo_text}",
             "",
-            f"**{i18n('Advanced Generation Parameters')}**:",
+            f"**{i18n('高级生成参数设置')}**:",
             "",
         ]
         for key, value in advanced.items():
             lines.append(f"- `{key}`: {value}")
         return "\n".join(lines)
     except Exception as e:
-        return f"{i18n('Failed to load preset')}: {e}"
+        return f"{i18n('加载预设失败')}: {e}"
 
 def refresh_preset_choices():
     choices = [""] + list_presets()
@@ -1371,21 +807,21 @@ def _format_preset_preview(
     length_penalty, num_beams, repetition_penalty,
     max_mel_tokens, max_text_tokens_per_segment,
 ):
-    emo_label = EMO_CHOICES_ALL[emo_control_method] if 0 <= emo_control_method < len(EMO_CHOICES_ALL) else i18n("Unknown")
+    emo_label = EMO_CHOICES_ALL[emo_control_method] if 0 <= emo_control_method < len(EMO_CHOICES_ALL) else i18n("未知")
     vec = [float(v) for v in [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]]
-    prompt_label = os.path.basename(prompt_audio) if prompt_audio else i18n("None")
-    emo_label_audio = os.path.basename(emo_ref_path) if emo_ref_path else i18n("None")
+    prompt_label = os.path.basename(prompt_audio) if prompt_audio else i18n("无")
+    emo_label_audio = os.path.basename(emo_ref_path) if emo_ref_path else i18n("无")
     lines = [
-        f"**{i18n('Emotion Control Method')}**: {emo_label}",
-        f"**{i18n('Emotion Weight')}**: {emo_weight}",
-        f"**{i18n('Emotion Random Sampling')}**: {'On' if emo_random else 'Off'}",
-        f"**{i18n('Voice Audio')}**: `{prompt_label}`",
-        f"**{i18n('Emotion Audio')}**: `{emo_label_audio}`",
+        f"**{i18n('情感控制方式')}**: {emo_label}",
+        f"**{i18n('情感权重')}**: {emo_weight}",
+        f"**{i18n('情感随机采样')}**: {'On' if emo_random else 'Off'}",
+        f"**{i18n('音色音频')}**: `{prompt_label}`",
+        f"**{i18n('情感音频')}**: `{emo_label_audio}`",
         "",
-        f"**{i18n('Emotion Vector')}**: `[{', '.join(str(round(v, 2)) for v in vec)}]`",
-        f"**{i18n('Emotion Description Text')}**: {emo_text or i18n('None')}",
+        f"**{i18n('情感向量')}**: `[{', '.join(str(round(v, 2)) for v in vec)}]`",
+        f"**{i18n('情感描述文本')}**: {emo_text or i18n('无')}",
         "",
-        f"**{i18n('Advanced Generation Parameters')}**:",
+        f"**{i18n('高级生成参数设置')}**:",
         f"- do_sample: {do_sample}",
         f"- top_p: {top_p}",
         f"- top_k: {top_k}",
@@ -1445,6 +881,110 @@ def confirm_save_preset_from_modal(
 def close_save_preset_modal():
     return gr.update(visible=False)
 
+
+# ── Conditional gen_single (async for vLLM, sync for non-vLLM) ────────────────
+
+if cmd_args.vllm:
+    async def gen_single(emo_control_method, prompt, text,
+                   emo_ref_path, emo_weight,
+                   vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                   emo_text, emo_random,
+                   max_text_tokens_per_segment=120,
+                   *args, progress=gr.Progress()):
+        output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
+        tts.gr_progress = progress
+        do_sample, top_p, top_k, temperature, \
+            length_penalty, num_beams, repetition_penalty, max_mel_tokens, trim_silence_val = args
+        kwargs = {
+            "do_sample": bool(do_sample),
+            "top_p": float(top_p),
+            "top_k": int(top_k) if int(top_k) > 0 else None,
+            "temperature": float(temperature),
+            "length_penalty": float(length_penalty),
+            "num_beams": num_beams,
+            "repetition_penalty": float(repetition_penalty),
+            "max_mel_tokens": int(max_mel_tokens),
+        }
+        if type(emo_control_method) is not int:
+            emo_control_method = emo_control_method.value
+        if emo_control_method == 0:
+            emo_ref_path = None
+        if emo_control_method == 2:
+            vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+            vec = tts.normalize_emo_vec(vec, apply_bias=True)
+        else:
+            vec = None
+        if emo_text == "":
+            emo_text = None
+        
+        output = await tts.infer(
+            spk_audio_prompt=prompt,
+            text=text,
+            output_path=output_path,
+            emo_audio_prompt=emo_ref_path,
+            emo_alpha=emo_weight,
+            emo_vector=vec,
+            use_emo_text=(emo_control_method==3),
+            emo_text=emo_text,
+            use_random=emo_random,
+            verbose=cmd_args.verbose,
+            max_text_tokens_per_sentence=int(max_text_tokens_per_segment),
+            **kwargs
+        )
+        if trim_silence_val:
+            trim_audio_wav(output_path)
+        return gr.update(value=output_path, visible=True)
+else:
+    def gen_single(emo_control_method, prompt, text,
+                   emo_ref_path, emo_weight,
+                   vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                   emo_text, emo_random,
+                   max_text_tokens_per_segment=120,
+                   *args, progress=gr.Progress()):
+        output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
+        tts.gr_progress = progress
+        do_sample, top_p, top_k, temperature, \
+            length_penalty, num_beams, repetition_penalty, max_mel_tokens, trim_silence_val = args
+        kwargs = {
+            "do_sample": bool(do_sample),
+            "top_p": float(top_p),
+            "top_k": int(top_k) if int(top_k) > 0 else None,
+            "temperature": float(temperature),
+            "length_penalty": float(length_penalty),
+            "num_beams": num_beams,
+            "repetition_penalty": float(repetition_penalty),
+            "max_mel_tokens": int(max_mel_tokens),
+        }
+        if type(emo_control_method) is not int:
+            emo_control_method = emo_control_method.value
+        if emo_control_method == 0:
+            emo_ref_path = None
+        if emo_control_method == 2:
+            vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+            vec = tts.normalize_emo_vec(vec, apply_bias=True)
+        else:
+            vec = None
+        if emo_text == "":
+            emo_text = None
+        
+        output = tts.infer(
+            spk_audio_prompt=prompt,
+            text=text,
+            output_path=output_path,
+            emo_audio_prompt=emo_ref_path,
+            emo_alpha=emo_weight,
+            emo_vector=vec,
+            use_emo_text=(emo_control_method==3),
+            emo_text=emo_text,
+            use_random=emo_random,
+            verbose=cmd_args.verbose,
+            max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+            **kwargs
+        )
+        if trim_silence_val:
+            trim_audio_wav(output_path)
+        return gr.update(value=output, visible=True)
+
 def update_prompt_audio():
     return gr.update(interactive=True)
 
@@ -1452,9 +992,13 @@ def create_warning_message(warning_text):
     return gr.HTML(f"<div style=\"padding: 0.5em 0.8em; border-radius: 0.5em; background: #ffa87d; color: #000; font-weight: bold\">{html.escape(warning_text)}</div>")
 
 def create_experimental_warning_message():
-    return create_warning_message(i18n('Note: This feature is experimental and results may be unstable. We are continuously optimizing it.'))
+    return create_warning_message(i18n('提示：此功能为实验版，结果尚不稳定，我们正在持续优化中。'))
 
-_mode_badge = (
+_vllm_badge = (
+    '<span style="background:#22c55e;color:#fff;padding:2px 10px;'
+    'border-radius:999px;font-size:0.85em;font-weight:bold;margin-left:8px">'
+    '🚀 vLLM ON</span>'
+) if cmd_args.vllm else (
     '<span style="background:#64748b;color:#fff;padding:2px 10px;'
     'border-radius:999px;font-size:0.85em;font-weight:bold;margin-left:8px">'
     'Standard Mode</span>'
@@ -1505,17 +1049,18 @@ with gr.Blocks(
         }
     """,
 ) as demo:
+    mutex = threading.Lock()
     gr.HTML(f'''
-    <h2><center>IndexTTS2: A Breakthrough in Emotionally Expressive and Duration-Controlled Auto-Regressive Zero-Shot Text-to-Speech {_mode_badge}</h2>
+    <h2><center>IndexTTS2: A Breakthrough in Emotionally Expressive and Duration-Controlled Auto-Regressive Zero-Shot Text-to-Speech {_vllm_badge}</h2>
 <p align="center">
 <a href='https://arxiv.org/abs/2506.21619'><img src='https://img.shields.io/badge/ArXiv-2506.21619-red'></a>
 </p>
     ''')
 
-    with gr.Tab(i18n("Audio Generation")):
+    with gr.Tab(i18n("音频生成")):
         os.makedirs("prompts", exist_ok=True)
 
-        gr.Markdown(f"### {i18n('Voice Reference Audio')}")
+        gr.Markdown(f"### {i18n('音色参考音频')}")
         with gr.Row(equal_height=False):
             with gr.Column(scale=1):
                 prompt_audio = gr.Audio(
@@ -1526,166 +1071,119 @@ with gr.Blocks(
                     elem_classes=["compact-audio"],
                     elem_id="prompt_audio_compact",
                 )
-                save_preset_btn = gr.Button(i18n("Save as Preset"), interactive=False)
+                save_preset_btn = gr.Button(i18n("保存为预设"), interactive=False)
             with gr.Column(scale=1):
                 _has_presets = bool(list_presets())
                 load_preset_dropdown = gr.Dropdown(
                     choices=[""] + list_presets(),
                     value="",
-                    label=i18n("Load from Preset"),
-                    info=i18n("Load voice and parameters from preset"),
+                    label=i18n("从预设加载"),
+                    info=i18n("从预设加载音色和参数"),
                     allow_custom_value=False,
                     interactive=_has_presets,
                 )
 
-        gr.Markdown(f"### {i18n('Text')}")
+        gr.Markdown(f"### {i18n('文本')}")
         with gr.Row(equal_height=False):
             with gr.Column(scale=2):
                 input_text_single = gr.TextArea(
                     label="",
                     key="input_text_single",
-                    placeholder=i18n("Please enter the target text"),
-                    info=f"{i18n('Current model version: ')}{tts.model_version or '1.0'}",
+                    placeholder=i18n("请输入目标文本"),
+                    info=f"{i18n('当前模型版本')}{tts.model_version or '1.0'}",
                     lines=5,
                 )
             with gr.Column(scale=1):
-                gen_button = gr.Button(i18n("Generate Speech"), key="gen_button", interactive=True)
-                output_audio = gr.Audio(label=i18n("Generation Result"), visible=True, key="output_audio")
+                gen_button = gr.Button(i18n("生成语音"), key="gen_button", interactive=True)
+                output_audio = gr.Audio(label=i18n("生成结果"), visible=True, key="output_audio")
 
         with gr.Row():
-            experimental_checkbox = gr.Checkbox(label=i18n("Show experimental features"), value=False)
-            glossary_checkbox = gr.Checkbox(label=i18n("Enable term glossary pronunciation"), value=tts.normalizer.enable_glossary)
-        with gr.Accordion(i18n("Function Settings")):
+            experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=False)
+            glossary_checkbox = gr.Checkbox(label=i18n("开启术语词汇读音"), value=tts.normalizer.enable_glossary)
+        with gr.Accordion(i18n("功能设置")):
             with gr.Row():
                 emo_control_method = gr.Radio(
                     choices=EMO_CHOICES_OFFICIAL,
                     type="index",
-                    value=EMO_CHOICES_OFFICIAL[0], label=i18n("Emotion Control Method"))
+                    value=EMO_CHOICES_OFFICIAL[0], label=i18n("情感控制方式"))
                 emo_control_method_all = gr.Radio(
                     choices=EMO_CHOICES_ALL,
                     type="index",
-                    value=EMO_CHOICES_ALL[0], label=i18n("Emotion Control Method"),
+                    value=EMO_CHOICES_ALL[0], label=i18n("情感控制方式"),
                     visible=False)
         with gr.Group(visible=False) as emotion_reference_group:
             with gr.Row():
-                emo_upload = gr.Audio(label=i18n("Upload Emotion Reference Audio"), type="filepath")
+                emo_upload = gr.Audio(label=i18n("上传情感参考音频"), type="filepath")
         with gr.Row(visible=False) as emotion_randomize_group:
-            emo_random = gr.Checkbox(label=i18n("Emotion Random Sampling"), value=False)
+            emo_random = gr.Checkbox(label=i18n("情感随机采样"), value=False)
         with gr.Group(visible=False) as emotion_vector_group:
             with gr.Row():
                 with gr.Column():
-                    vec1 = gr.Slider(label=i18n("Happy"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec2 = gr.Slider(label=i18n("Angry"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec3 = gr.Slider(label=i18n("Sad"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec4 = gr.Slider(label=i18n("Fear"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec1 = gr.Slider(label=i18n("喜"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec2 = gr.Slider(label=i18n("怒"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec3 = gr.Slider(label=i18n("哀"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec4 = gr.Slider(label=i18n("惧"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
                 with gr.Column():
-                    vec5 = gr.Slider(label=i18n("Disgust"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec6 = gr.Slider(label=i18n("Depressed"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec7 = gr.Slider(label=i18n("Surprise"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec8 = gr.Slider(label=i18n("Calm"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec5 = gr.Slider(label=i18n("厌恶"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec6 = gr.Slider(label=i18n("低落"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec7 = gr.Slider(label=i18n("惊喜"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
+                    vec8 = gr.Slider(label=i18n("平静"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
         with gr.Group(visible=False) as emo_text_group:
             create_experimental_warning_message()
             with gr.Row():
                 emo_text = gr.Textbox(
-                    label=i18n("Emotion Description Text"),
-                    placeholder=i18n("Enter emotion description (or leave blank to use target text automatically)"),
+                    label=i18n("情感描述文本"),
+                    placeholder=i18n("请输入情绪描述（或留空以自动使用目标文本作为情绪描述）"),
                     value="",
-                    info=i18n("For example: aggrieved, danger is quietly approaching"))
+                    info=i18n("例如：委屈巴巴、危险在悄悄逼近"))
         with gr.Row(visible=False) as emo_weight_group:
-            emo_weight = gr.Slider(label=i18n("Emotion Weight"), minimum=0.0, maximum=1.0, value=0.65, step=0.01)
+            emo_weight = gr.Slider(label=i18n("情感权重"), minimum=0.0, maximum=1.0, value=0.65, step=0.01)
 
-        with gr.Accordion(i18n("Custom Term Glossary Pronunciation"), open=False, visible=tts.normalizer.enable_glossary) as glossary_accordion:
-            gr.Markdown(i18n("Customize pronunciation of specific technical terms"))
+        with gr.Accordion(i18n("自定义术语词汇读音"), open=False, visible=tts.normalizer.enable_glossary) as glossary_accordion:
+            gr.Markdown(i18n("自定义个别专业术语的读音"))
             with gr.Row():
                 with gr.Column(scale=1):
-                    glossary_term = gr.Textbox(label=i18n("Term"), placeholder="IndexTTS2")
-                    glossary_reading_zh = gr.Textbox(label=i18n("Chinese Reading"), placeholder="Index T-T-S two")
-                    glossary_reading_en = gr.Textbox(label=i18n("English Reading"), placeholder="Index T-T-S two")
-                    btn_add_term = gr.Button(i18n("Add Term"), scale=1)
+                    glossary_term = gr.Textbox(label=i18n("术语"), placeholder="IndexTTS2")
+                    glossary_reading_zh = gr.Textbox(label=i18n("中文读法"), placeholder="Index T-T-S 二")
+                    glossary_reading_en = gr.Textbox(label=i18n("英文读法"), placeholder="Index T-T-S two")
+                    btn_add_term = gr.Button(i18n("添加术语"), scale=1)
                 with gr.Column(scale=2):
                     glossary_table = gr.Markdown(value=format_glossary_markdown())
 
-        with gr.Accordion(i18n("Advanced Generation Parameters"), open=False, visible=True) as advanced_settings_group:
+        with gr.Accordion(i18n("高级生成参数设置"), open=False, visible=True) as advanced_settings_group:
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown(f"**{i18n('GPT2 Sampling Settings')}** _{i18n('Parameters affect audio diversity and generation speed, see')} [Generation strategies](https://huggingface.co/docs/transformers/main/en/generation_strategies)._")
+                    gr.Markdown(f"**{i18n('GPT2 采样设置')}** _{i18n('参数会影响音频多样性和生成速度详见')} [Generation strategies](https://huggingface.co/docs/transformers/main/en/generation_strategies)._")
                     with gr.Row():
-                        do_sample = gr.Checkbox(label="do_sample", value=True, info=i18n("Whether to sample"))
+                        do_sample = gr.Checkbox(label="do_sample", value=True, info=i18n("是否进行采样"))
                         temperature = gr.Slider(label="temperature", minimum=0.1, maximum=2.0, value=0.8, step=0.1)
                     with gr.Row():
                         top_p = gr.Slider(label="top_p", minimum=0.0, maximum=1.0, value=0.8, step=0.01)
                         top_k = gr.Slider(label="top_k", minimum=0, maximum=100, value=30, step=1)
                         num_beams = gr.Slider(label="num_beams", value=3, minimum=1, maximum=10, step=1)
                     with gr.Row():
-                        repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=2.0, minimum=0.1, maximum=20.0, step=0.1)
+                        repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0, minimum=0.1, maximum=20.0, step=0.1)
                         length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
-                    max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info=i18n("Max tokens to generate, too small will truncate audio"), key="max_mel_tokens")
-                    diffusion_steps = gr.Slider(label="diffusion_steps", value=32, minimum=10, maximum=60, step=1, info=i18n("Vocoder quality: higher = crisper audio but slower. 25=fast draft, 32=production, 40=max."), key="diffusion_steps")
-                    trim_silence = gr.Checkbox(label=i18n("Auto trim head/tail silence and tail noise"), value=True, info=i18n("Fixes the issue of model generating overly long silent tails"))
-                    with gr.Row():
-                        duration_mode = gr.Dropdown(
-                            label=i18n("Duration Control"),
-                            choices=["Auto", "Match SRT Duration", "Seconds", "Tokens"],
-                            value="Auto",
-                            info=i18n("Auto = native pacing (default, recommended). 'Match SRT Duration' targets each SRT segment's own subtitle timing (SRT Batch tab only - degrades to Auto in Audio Generation tab, no SRT timing available there). 'Seconds'/'Tokens' target a fixed length for every generation in either tab. Only applies to single-segment text; longer text falls back to Auto with a warning."),
-                        )
-                        target_duration_seconds = gr.Number(label=i18n("Target Duration (seconds)"), value=5.0, minimum=0.1, maximum=60.0, step=0.1, visible=False)
-                        target_semantic_tokens = gr.Number(label=i18n("Target Semantic Tokens"), value=250, minimum=1, maximum=3000, step=1, visible=False)
-                    with gr.Row():
-                        seed_number = gr.Number(label=i18n("Base Random Seed"), value=42, precision=0, info=i18n("Fixed seed enables reproducible debugging of a specific segment"))
-                        max_retries_number = gr.Slider(label=i18n("Max Retries per Segment on QA Failure"), value=2, minimum=0, maximum=5, step=1, info=i18n("SRT batch only: automatically retries a segment with a new seed if audio fails quality check OR is detected as truncated by the model's internal length estimate"))
+                    max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info=i18n("生成Token最大数量，过小导致音频被截断"), key="max_mel_tokens")
+                    trim_silence = gr.Checkbox(label=i18n("自动裁剪首尾静音及尾部噪音"), value=True, info=i18n("修复模型生成超长无声尾音的问题"))
                 with gr.Column(scale=2):
-                    gr.Markdown(f'**{i18n("Segmentation Settings")}** _{i18n("Parameters affect audio quality and generation speed")}_')
+                    gr.Markdown(f'**{i18n("分句设置")}** _{i18n("参数会影响音频质量和生成速度")}_')
                     with gr.Row():
                         initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
                         max_text_tokens_per_segment = gr.Slider(
-                            label=i18n("Max Tokens per Segment"), value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
-                            info=i18n("Recommended 80~200. Larger value = longer segments; smaller = fragmented. Too large or too small may degrade quality"),
+                            label=i18n("分句最大Token数"), value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
+                            info=i18n("建议80~200之间，值越大，分句越长；值越小，分句越碎；过小过大都可能导致音频质量不高"),
                         )
-                    with gr.Accordion(i18n("Preview Segments"), open=True) as segments_settings:
+                    with gr.Accordion(i18n("预览分句结果"), open=True) as segments_settings:
                         segments_preview = gr.Dataframe(
-                            headers=[i18n("Index"), i18n("Segment Content"), i18n("Token Count")],
+                            headers=[i18n("序号"), i18n("分句内容"), i18n("Token数")],
                             key="segments_preview",
                             wrap=True,
                         )
-            with gr.Accordion("🎵 " + i18n("Background Music (mood-matched, optional)"), open=False):
-                bg_enable = gr.Checkbox(label=i18n("Add background music under the voice"), value=False,
-                                        info=i18n("Post-processing only — never affects voice quality. Music is auto-matched to the detected emotion."))
-                with gr.Row():
-                    bg_source = gr.Dropdown(label=i18n("Music source"),
-                                            choices=["musicgen", "library"], value="musicgen",
-                                            info=i18n("musicgen = generate on GPU (small model). library = pick from a local folder."))
-                    bg_prompt_extra = gr.Textbox(label=i18n("Style hint (optional)"), value="",
-                                                 placeholder=i18n("e.g. lo-fi hip hop, cinematic strings, acoustic guitar"))
-                with gr.Row():
-                    bg_volume_db = gr.Slider(label=i18n("Music volume (dB below voice)"),
-                                             minimum=-36, maximum=-6, value=-18, step=1)
-                    bg_duck_db = gr.Slider(label=i18n("Ducking under speech (dB)"),
-                                           minimum=-24, maximum=0, value=-12, step=1,
-                                           info=i18n("How much the music dips while the voice is speaking."))
-                gr.Markdown("— " + i18n("Ambience / Sound Effects (AFX)") + " —")
-                sfx_enable = gr.Checkbox(label=i18n("Add mood-matched ambience under the voice"), value=False,
-                                         info=i18n("Environmental sound (rain, wind, room tone…) matched to the emotion. Layered UNDER music/voice, ducked like music. Post-processing only."))
-                with gr.Row():
-                    sfx_source = gr.Dropdown(label=i18n("SFX source"),
-                                             choices=["audiogen", "musicgen", "library"], value="audiogen",
-                                             info=i18n("audiogen = environmental SFX model (GPU). Falls back to voice if unavailable."))
-                    sfx_prompt_extra = gr.Textbox(label=i18n("Ambience hint (optional)"), value="",
-                                                  placeholder=i18n("e.g. light rain, distant crowd, office room tone"))
-                with gr.Row():
-                    sfx_volume_db = gr.Slider(label=i18n("Ambience volume (dB below voice)"),
-                                              minimum=-40, maximum=-10, value=-24, step=1)
-                    sfx_duck_db = gr.Slider(label=i18n("Ambience ducking under speech (dB)"),
-                                            minimum=-24, maximum=0, value=-9, step=1)
-
             advanced_params = [
                 do_sample, top_p, top_k, temperature,
                 length_penalty, num_beams, repetition_penalty, max_mel_tokens,
-                trim_silence, max_retries_number, seed_number,
-                diffusion_steps,
-                bg_enable, bg_source, bg_prompt_extra, bg_volume_db, bg_duck_db,
-                sfx_enable, sfx_source, sfx_prompt_extra, sfx_volume_db, sfx_duck_db,
-                duration_mode, target_duration_seconds, target_semantic_tokens,
+                trim_silence,
             ]
 
         example_table = gr.Dataset(
@@ -1697,14 +1195,14 @@ with gr.Blocks(
                         emo_weight, emo_text, vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
         )
 
-    with gr.Tab(i18n("SRT Batch Dubbing")):
-        gr.Markdown(f"### {i18n('SRT Subtitle Batch Dubbing')}")
-        gr.Markdown(i18n('Uses "Voice Reference Audio" and emotion/sampling settings from the "Audio Generation" tab above. After importing an SRT file, it will generate line-by-line and package as a ZIP download. Each segment is automatically quality-checked (including detection of internal generation truncation) and retried with a new seed on failure. All model calls are serialized to prevent shared-state race conditions during long batches. Reference audio longer than 15s is pre-trimmed ONCE to a fixed window so every segment conditions on identical reference bytes.'))
+    with gr.Tab(i18n("SRT批量配音")):
+        gr.Markdown(f"### {i18n('SRT字幕批量配音')}")
+        gr.Markdown(i18n('使用上方"音频生成"选项卡中的"音色参考音频"和情感/采样设置。导入SRT文件后，将逐句生成并打包为ZIP下载。'))
         with gr.Row():
-            srt_file_input = gr.File(label=i18n("Upload SRT Subtitle File"), file_types=[".srt"])
-            srt_gen_button = gr.Button(i18n("Start SRT Dubbing Generation"), variant="primary")
-        srt_status = gr.Textbox(label=i18n("Processing Status"), interactive=False, value="")
-        srt_output_zip = gr.File(label=i18n("Download Dubbing File (ZIP)"), visible=False)
+            srt_file_input = gr.File(label=i18n("上传SRT字幕文件"), file_types=[".srt"])
+            srt_gen_button = gr.Button(i18n("开始生成SRT配音"), variant="primary")
+        srt_status = gr.Textbox(label=i18n("处理状态"), interactive=False, value="")
+        srt_output_zip = gr.File(label=i18n("下载配音文件(ZIP)"), visible=False)
 
         srt_gen_button.click(
             gen_srt,
@@ -1719,40 +1217,40 @@ with gr.Blocks(
             outputs=[srt_output_zip, srt_status]
         )
 
-    with gr.Tab(i18n("Preset Management")):
-        gr.Markdown(f"## {i18n('Preset Management')}")
+    with gr.Tab(i18n("预设管理")):
+        gr.Markdown(f"## {i18n('预设管理')}")
         with gr.Row():
             _has_presets = bool(list_presets())
             manage_preset_dropdown = gr.Dropdown(
                 choices=[""] + list_presets(),
                 value="",
-                label=i18n("Preset List"),
+                label=i18n("预设列表"),
                 allow_custom_value=False,
                 scale=2,
                 interactive=_has_presets,
             )
-            apply_preset_btn = gr.Button(i18n("Apply"), scale=1)
-            delete_preset_btn = gr.Button(i18n("Delete"), scale=1, interactive=False)
-            refresh_preset_btn = gr.Button(i18n("Refresh"), scale=1)
-        preset_details_markdown = gr.Markdown(value=i18n("Please select a preset to manage"))
-        with gr.Accordion(i18n("Create from current state"), open=False):
+            apply_preset_btn = gr.Button(i18n("应用"), scale=1)
+            delete_preset_btn = gr.Button(i18n("删除"), scale=1, interactive=False)
+            refresh_preset_btn = gr.Button(i18n("刷新"), scale=1)
+        preset_details_markdown = gr.Markdown(value=i18n("请选择要管理的预设"))
+        with gr.Accordion(i18n("从当前状态创建"), open=False):
             with gr.Row():
                 create_preset_name = gr.Textbox(
-                    label=i18n("Preset Name"),
-                    placeholder=i18n("Please enter preset name"),
+                    label=i18n("预设名称"),
+                    placeholder=i18n("请输入预设名称"),
                     value="",
                     scale=2,
                 )
-                create_preset_btn = gr.Button(i18n("Create"), scale=1)
+                create_preset_btn = gr.Button(i18n("创建"), scale=1)
 
     with gr.Column(visible=False, elem_classes=["preset-modal-overlay"]) as save_preset_modal:
         with gr.Column(elem_classes=["preset-modal-content"]):
-            gr.Markdown(f"### {i18n('Save Preset')}")
-            modal_preset_preview = gr.Markdown(label=i18n("Preset Preview"), value=i18n("Preset Preview"))
-            modal_preset_name = gr.Textbox(label=i18n("Preset Name"), placeholder=i18n("Please enter preset name"), value="")
+            gr.Markdown(f"### {i18n('保存预设')}")
+            modal_preset_preview = gr.Markdown(label=i18n("预设预览"), value=i18n("预设预览"))
+            modal_preset_name = gr.Textbox(label=i18n("预设名称"), placeholder=i18n("请输入预设名称"), value="")
             with gr.Row():
-                modal_cancel_btn = gr.Button(i18n("Cancel"), scale=1)
-                modal_confirm_btn = gr.Button(i18n("Confirm"), scale=1, variant="primary")
+                modal_cancel_btn = gr.Button(i18n("取消"), scale=1)
+                modal_confirm_btn = gr.Button(i18n("确认"), scale=1, variant="primary")
 
     def on_example_click(example):
         return (
@@ -1784,7 +1282,7 @@ with gr.Blocks(
             data = [[i, ''.join(s), len(s)] for i, s in enumerate(segments)]
             return {segments_preview: gr.update(value=data, visible=True)}
         else:
-            df = pd.DataFrame([], columns=[i18n("Index"), i18n("Segment Content"), i18n("Token Count")])
+            df = pd.DataFrame([], columns=[i18n("序号"), i18n("分句内容"), i18n("Token数")])
             return {segments_preview: gr.update(value=df)}
 
     def on_add_glossary_term(term, reading_zh, reading_en):
@@ -1792,10 +1290,10 @@ with gr.Blocks(
         reading_zh = reading_zh.rstrip()
         reading_en = reading_en.rstrip()
         if not term:
-            gr.Warning(i18n("Please enter a term"))
+            gr.Warning(i18n("请输入术语"))
             return gr.update()
         if not reading_zh and not reading_en:
-            gr.Warning(i18n("Please enter at least one reading"))
+            gr.Warning(i18n("请至少输入一种读法"))
             return gr.update()
         if reading_zh and reading_en:
             reading = {"zh": reading_zh, "en": reading_en}
@@ -1806,9 +1304,9 @@ with gr.Blocks(
         tts.normalizer.term_glossary[term] = reading
         try:
             tts.normalizer.save_glossary_to_yaml(tts.glossary_path)
-            gr.Info(i18n("Glossary updated"), duration=1)
+            gr.Info(i18n("词汇表已更新"), duration=1)
         except Exception as e:
-            gr.Error(i18n("Error saving glossary"))
+            gr.Error(i18n("保存词汇表时出错"))
             print(f"Error details: {e}")
             return gr.update()
         return gr.update(value=format_glossary_markdown())
@@ -1826,16 +1324,6 @@ with gr.Blocks(
     emo_control_method.change(on_method_change,
         inputs=[emo_control_method],
         outputs=[emotion_reference_group, emotion_randomize_group, emotion_vector_group, emo_text_group, emo_weight_group])
-
-    def on_duration_mode_change(mode):
-        return (
-            gr.update(visible=(mode == "Seconds")),
-            gr.update(visible=(mode == "Tokens")),
-        )
-
-    duration_mode.change(on_duration_mode_change,
-        inputs=[duration_mode],
-        outputs=[target_duration_seconds, target_semantic_tokens])
 
     def on_experimental_change(is_experimental, current_mode_index):
         new_choices = EMO_CHOICES_ALL if is_experimental else EMO_CHOICES_OFFICIAL
@@ -1872,7 +1360,7 @@ with gr.Blocks(
         try:
             tts.normalizer.load_glossary_from_yaml(tts.glossary_path)
         except Exception as e:
-            gr.Error(i18n("Error loading glossary"))
+            gr.Error(i18n("加载词汇表时出错"))
             print(f"Failed to reload glossary on page load: {e}")
         return (gr.update(value=format_glossary_markdown()), *refresh_preset_choices())
 
