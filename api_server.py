@@ -63,6 +63,7 @@ from loguru import logger
 
 _orig_master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
 orig_master_port = int(os.environ.get("MASTER_PORT", "29500"))
+exchange_port = orig_master_port + (1 if "TORCHELASTIC_RUN_ID" in os.environ else 0)
 
 def _env_int(*names) -> Tuple[Optional[int], Optional[str]]:
     """First integer-valued env var among names -> (value, source_name)."""
@@ -164,12 +165,12 @@ if my_world_size > 1:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         # Use the firewall-approved MASTER_PORT for the IP exchange (Lightning
         # explicitly opens this exact port for inter-node traffic).
-        srv.bind(("0.0.0.0", orig_master_port))
+        srv.bind(("0.0.0.0", exchange_port))
         srv.listen(my_world_size)
         srv.settimeout(15.0)
 
         collected, t0, last_log = 1, time.time(), 0.0
-        logger.info(f"Rank 0 waiting for {my_world_size - 1} worker(s) on port {orig_master_port} "
+        logger.info(f"Rank 0 waiting for {my_world_size - 1} worker(s) on port {exchange_port} "
                     f"(deadline {PEER_WAIT_S:.0f}s)...")
         while collected < my_world_size and (time.time() - t0) < PEER_WAIT_S:
             try:
@@ -234,14 +235,14 @@ if my_world_size > 1:
             probe = None
 
         t0, connected, attempt = time.time(), False, 0
-        logger.info(f"Rank {my_rank} connecting to Rank 0 ({_orig_master_addr}:{orig_master_port}) "
+        logger.info(f"Rank {my_rank} connecting to Rank 0 ({_orig_master_addr}:{exchange_port}) "
                     f"as {my_ip} (deadline {PEER_WAIT_S:.0f}s)...")
         while (time.time() - t0) < PEER_WAIT_S and not connected:
             attempt += 1
             try:
                 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 client.settimeout(10.0)
-                client.connect((_orig_master_addr, orig_master_port))
+                client.connect((_orig_master_addr, exchange_port))
                 client.sendall(my_ip.encode('utf-8'))
                 reply = client.recv(16).decode('utf-8').strip()   # "OK:<port>"
                 client.close()
@@ -259,7 +260,7 @@ if my_world_size > 1:
             try: probe.close()
             except Exception: pass
         if not connected:
-            logger.critical(f"Rank {my_rank} could not reach Rank 0 at {_orig_master_addr}:{orig_master_port} "
+            logger.critical(f"Rank {my_rank} could not reach Rank 0 at {_orig_master_addr}:{exchange_port} "
                             f"within {PEER_WAIT_S:.0f}s. dist env was: {_DIST_ENV_DUMP}. Exiting.")
             sys.exit(1)
 else:
