@@ -824,7 +824,7 @@ class QwenEmotion:
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_dir,
             torch_dtype="float16",  # "auto"
-            device_map="auto"
+            device_map={"": 0}
         )
         self.prompt = "文本情感分类"
         self.cn_key_to_en = {
