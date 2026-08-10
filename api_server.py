@@ -296,7 +296,20 @@ os.environ["MASTER_ADDR"] = "127.0.0.1"
 os.environ["MASTER_PORT"] = str(orig_master_port + 500 + my_rank)
 os.environ["WORLD_SIZE"] = "1"
 os.environ["RANK"] = "0"
+
+# Isolate GPUs so accelerate's device_map="auto" doesn't see all GPUs
+_true_local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+if "CUDA_VISIBLE_DEVICES" in os.environ:
+    _cvd = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
+    if _true_local_rank < len(_cvd):
+        os.environ["CUDA_VISIBLE_DEVICES"] = _cvd[_true_local_rank].strip()
+else:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(_true_local_rank)
+
 os.environ["LOCAL_RANK"] = "0"
+# Wipe out other torchrun variables that confuse accelerate
+for k in ["LOCAL_WORLD_SIZE", "GROUP_WORLD_SIZE", "GROUP_RANK", "NODE_RANK", "CROSS_RANK"]:
+    os.environ.pop(k, None)
 # ──────────────────────────────────────────────────────────────────────────
 
 _rr_idx = 0  # Round-robin index for load balancing
