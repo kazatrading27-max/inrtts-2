@@ -308,7 +308,7 @@ else:
 
 os.environ["LOCAL_RANK"] = "0"
 # Wipe out other torchrun variables that confuse accelerate
-for k in ["LOCAL_WORLD_SIZE", "GROUP_WORLD_SIZE", "GROUP_RANK", "NODE_RANK", "CROSS_RANK"]:
+for k in ["LOCAL_WORLD_SIZE", "GROUP_WORLD_SIZE", "GROUP_RANK", "NODE_RANK", "CROSS_RANK", "TORCHELASTIC_RUN_ID"]:
     os.environ.pop(k, None)
 # ──────────────────────────────────────────────────────────────────────────
 
