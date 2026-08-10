@@ -1,0 +1,152 @@
+#@title Install     [🕒 Wait for 2 minutes]
+%cd /content
+# !rm -rf /content/inrtts-2
+!git lfs install
+# !git clone https://github.com/index-tts/index-tts.git
+!git clone https://github.com/kazatrading27-max/inrtts-2.git
+%cd inrtts-2
+!git lfs pull
+!wget https://raw.githubusercontent.com/NeuralFalconYT/Useful-Function/refs/heads/main/hf_downloader.py
+!pip install uv --quiet
+!uv sync --all-extras
+from IPython.display import clear_output
+clear_output()
+---
+#@title Download -2 Model [🕒 Wait for 40 seconds]
+%cd /content/inrtts-2
+from hf_downloader import download_model
+from IPython.display import clear_output
+import os
+import shutil
+import yaml
+
+# Install huggingface_hub + hf_transfer into BOTH environments:
+# 1. The current Colab kernel (for our script below)
+# 2. The project's isolated .venv (so webui_enhanced.py's internal downloads also work)
+!uv add -q -U huggingface_hub hf_transfer
+!/content/inrtts-2/.venv/bin/pip install -q -U huggingface_hub hf_transfer
+
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+
+from huggingface_hub import hf_hub_download
+
+clear_output()
+def add_share(file_path="/content/inrtts-2/webui_enhanced.py"):
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    for i, line in enumerate(lines):
+        if "demo.launch" in line:
+            lines[i] = "    demo.launch(share=True, debug=True)\n"
+
+    with open(file_path, "w") as f:
+        f.writelines(lines)
+
+    print(f"✅ Updated {file_path} with share=True, debug=True")
+
+model_path = download_model(
+    "IndexTeam/indexTTs-2",
+    download_folder="./checkpoints",
+    redownload=False
+)
+
+if os.path.isdir(model_path) and os.path.basename(model_path) != "checkpoints":
+    for item in os.listdir(model_path):
+        src = os.path.join(model_path, item)
+        dst = os.path.join("./checkpoints", item)
+        if os.path.exists(dst):
+            if os.path.isdir(dst):
+                shutil.rmtree(dst)
+            else:
+                os.remove(dst)
+        shutil.move(src, dst)
+    os.rmdir(model_path)
+    model_path = "./checkpoints"
+
+clear_output()
+print("✅ Model saved at:", model_path)
+add_share()
+
+
+# --- Replacing specific model files using the OFFICIAL Hugging Face Hub downloader ---
+print("🚀 Downloading and replacing Amharic model files (official HF method)...")
+
+checkpoints_dir = "/content/inrtts-2/checkpoints"
+
+def hf_download_and_rename(repo_id, filename, target_name):
+    downloaded_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        local_dir="/tmp/hf_dl",
+        force_download=True
+    )
+    target_path = os.path.join(checkpoints_dir, target_name)
+    shutil.move(downloaded_path, target_path)
+    print(f"✅ {filename} -> {target_path}")
+
+hf_download_and_rename("robadugna/am-index", "best.pth", "gpt.pth")
+hf_download_and_rename("robadugna/rtts2", "config_amharic.yaml", "config.yaml")
+hf_download_and_rename("robadugna/rtts2", "amharic_extended_bpe.model", "bpe.model")
+
+# --- Restore qwen_emo_path into the new Amharic config ---
+if qwen_emo_path and os.path.exists(config_path):
+    with open(config_path, 'r') as f:
+        new_cfg = yaml.safe_load(f)
+    new_cfg["qwen_emo_path"] = qwen_emo_path
+    with open(config_path, 'w') as f:
+        yaml.dump(new_cfg, f, allow_unicode=True)
+    print(f"✅ Patched new Amharic config.yaml with qwen_emo_path: {qwen_emo_path}")
+
+print("✅ Amharic model files successfully replaced.")
+---
+import torch
+import os
+import shutil
+
+ckpt_path = "/content/inrtts-2/checkpoints/gpt.pth"
+
+# 2. Load the checkpoint
+ckpt = torch.load(ckpt_path, map_location="cpu")
+
+# 3. Inspect structure (helps us confirm what key holds the actual weights)
+if isinstance(ckpt, dict):
+    print("🔍 Top-level keys found in checkpoint:")
+    print(list(ckpt.keys()))
+else:
+    print("🔍 Checkpoint is NOT a dict — it's likely already a raw state_dict.")
+
+# 4. Try to extract just the model weights (ignore optimizer/scheduler/step/etc.)
+state_dict = None
+if isinstance(ckpt, dict):
+    for key in ["model", "state_dict", "gpt", "module", "net", "weights"]:
+        if key in ckpt:
+            print(f"📦 Extracting weights from key: '{key}'")
+            state_dict = ckpt[key]
+            break
+    if state_dict is None:
+        # No known wrapper key found — check if the dict itself looks like a state_dict
+        # (i.e., values are tensors, not nested dicts like optimizer states)
+        sample_val = next(iter(ckpt.values()))
+        if torch.is_tensor(sample_val):
+            print("📦 Checkpoint dict itself appears to be the state_dict already.")
+            state_dict = ckpt
+        else:
+            raise ValueError("❌ Could not automatically detect weights key. Please share ckpt.keys() output.")
+else:
+    state_dict = ckpt
+
+# 5. Save ONLY the clean weights, overwriting the same filename
+torch.save(state_dict, ckpt_path)
+---
+#@title Run TTS-2  [🕒 Wait for 3 minutes]
+!git pull
+%cd /content/inrtts-2
+!wget -O /content/inrtts-2/checkpoints/config.yaml https://raw.githubusercontent.com/kazatrading27-max/inrtts-2/main/checkpoints/config.yaml
+!uv run webui_enhanced.py --model_dir "/content/inrtts-2/checkpoints"
+---
+#@title Run TTS-2  [🕒 Wait for 3 minutes]
+%cd /content/inrtts-2
+#!wget -O /content/inrtts-2/checkpoints/config.yaml https://raw.githubusercontent.com/kazatrading27-max/inrtts-2/main/checkpoints/config.yaml
+#!uv run api_server.py --model_dir ./checkpoints --device cuda --share --deepspeed
+#!torchrun --nproc_per_node=2 
+!uv run webui.py
