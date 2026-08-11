@@ -384,6 +384,7 @@ audiox_loaded_name: Optional[str] = None
 
 SPEAKER_CACHE_DIR = "assets/speaker_cache"
 SPEAKER_META_FILE = os.path.join(SPEAKER_CACHE_DIR, "meta.json")
+MAX_CACHED_VOICES = 200  # LRU eviction threshold for base64-uploaded voices
 
 _gpu_semaphore: Optional[asyncio.Semaphore] = None
 _queue_slots: Optional[asyncio.Semaphore] = None
@@ -639,6 +640,21 @@ async def _register_audio_from_base64(b64_data: str, speaker_name: str = "dynami
     final_path = os.path.join(SPEAKER_CACHE_DIR, f"{voice_id}.wav")
     os.rename(tmp_path, final_path)
     meta[voice_id] = {"voice_name": speaker_name or voice_id, "audio_path": final_path, "md5": md5, "original_filename": "inline_base64", "created_at": time.time(), "embedding_cached": False}
+    # LRU eviction: when the cache exceeds MAX_CACHED_VOICES, evict the
+    # oldest 25% of entries by created_at to prevent unbounded disk growth
+    # from per-segment dynamic references.
+    if len(meta) > MAX_CACHED_VOICES:
+        evict_count = max(1, MAX_CACHED_VOICES // 4)
+        sorted_by_age = sorted(meta.items(), key=lambda kv: kv[1].get("created_at", 0))
+        for evict_id, evict_entry in sorted_by_age[:evict_count]:
+            evict_path = evict_entry.get("audio_path", "")
+            if evict_path and os.path.exists(evict_path):
+                try:
+                    os.remove(evict_path)
+                except Exception:
+                    pass
+            del meta[evict_id]
+        logger.info(f"Voice cache LRU eviction: removed {evict_count} old entries ({len(meta)} remaining)")
     _save_meta(meta)
     logger.info(f"Registered dynamic voice from base64: {voice_id}")
     return final_path
@@ -1146,7 +1162,8 @@ async def _speech_response_from_payload(data: dict | BaseModel, *, text_field: s
         if data.get("trim_silence", True): wav = trim_audio_array(wav, sr)
         logger.info(f"TTS completed: {len(text)} chars, queue={infer_record['queue_time']:.2f}s, infer={infer_record['infer_time']:.2f}s, format: {output_format}")
         audio_bytes, media_type = _encode_audio(wav, sr, output_format)
-        return Response(content=audio_bytes, media_type=media_type, headers={"X-IndexTTS-Voice": str(voice_label), "X-IndexTTS-Sample-Rate": str(sr), "X-IndexTTS-Queue-Time": f"{infer_record['queue_time']:.3f}", "X-IndexTTS-Infer-Time": f"{infer_record['infer_time']:.3f}", "X-IndexTTS-Total-Time": f"{infer_record['total_time']:.3f}", "X-IndexTTS-Output-Format": output_format, "X-IndexTTS-DeepSpeed": str(_is_deepspeed_enabled()), "X-IndexTTS-Rank": str(my_rank)})
+        effective_max_mel = params.get("max_mel_tokens", 1500)
+        return Response(content=audio_bytes, media_type=media_type, headers={"X-IndexTTS-Voice": str(voice_label), "X-IndexTTS-Sample-Rate": str(sr), "X-IndexTTS-Queue-Time": f"{infer_record['queue_time']:.3f}", "X-IndexTTS-Infer-Time": f"{infer_record['infer_time']:.3f}", "X-IndexTTS-Total-Time": f"{infer_record['total_time']:.3f}", "X-IndexTTS-Output-Format": output_format, "X-IndexTTS-DeepSpeed": str(_is_deepspeed_enabled()), "X-IndexTTS-Rank": str(my_rank), "X-IndexTTS-Effective-Max-Mel-Tokens": str(effective_max_mel)})
     except TimeoutError as e: return JSONResponse(status_code=429, content={"error": str(e)})
     except Exception as e:
         logger.error(f"TTS failed: {e}"); traceback.print_exc()

@@ -10,6 +10,7 @@ import torchaudio
 from torch.nn.utils.rnn import pad_sequence
 
 import warnings
+import hashlib
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -230,8 +231,10 @@ class IndexTTS2:
         self.cache_s2mel_style = None
         self.cache_s2mel_prompt = None
         self.cache_spk_audio_prompt = None
+        self.cache_spk_audio_hash = None
         self.cache_emo_cond = None
         self.cache_emo_audio_prompt = None
+        self.cache_emo_audio_hash = None
         self.cache_mel = None
 
         # 进度引用显示（可选）
@@ -475,8 +478,20 @@ class IndexTTS2:
             emo_audio_prompt = spk_audio_prompt
             emo_alpha = 1.0
 
-        # Cache logic
-        if self.cache_spk_cond is None or self.cache_spk_audio_prompt != spk_audio_prompt:
+        # Cache logic — keyed by audio content hash (not file path) so different
+        # per-segment reference slices from the SAME speaker reuse one embedding
+        # set instead of triggering a full feature-extraction cache miss every
+        # segment (critical for Dynamic movie mode speed).
+        _spk_path_mismatch = (self.cache_spk_cond is None or self.cache_spk_audio_prompt != spk_audio_prompt)
+        _spk_hash_match = False
+        if _spk_path_mismatch and self.cache_spk_audio_hash is not None:
+            try:
+                with open(spk_audio_prompt, 'rb') as _f:
+                    _new_hash = hashlib.md5(_f.read()).hexdigest()
+                _spk_hash_match = (_new_hash == self.cache_spk_audio_hash)
+            except Exception:
+                pass
+        if _spk_path_mismatch and not _spk_hash_match:
             if self.cache_spk_cond is not None:
                 self.cache_spk_cond = None
                 self.cache_s2mel_style = None
@@ -515,6 +530,13 @@ class IndexTTS2:
             self.cache_s2mel_prompt = prompt_condition.detach()
             self.cache_spk_audio_prompt = spk_audio_prompt
             self.cache_mel = ref_mel.detach()
+            # Compute content hash AFTER _load_and_cut_audio has trimmed the file
+            # (the same hash is used for future comparisons even if the path differs)
+            try:
+                with open(spk_audio_prompt, 'rb') as _f:
+                    self.cache_spk_audio_hash = hashlib.md5(_f.read()).hexdigest()
+            except Exception:
+                self.cache_spk_audio_hash = None
         else:
             style = self.cache_s2mel_style
             prompt_condition = self.cache_s2mel_prompt
@@ -534,7 +556,20 @@ class IndexTTS2:
             emovec_mat = torch.sum(emovec_mat, 0)
             emovec_mat = emovec_mat.unsqueeze(0)
 
-        if self.cache_emo_cond is None or self.cache_emo_audio_prompt != emo_audio_prompt:
+        # Emotion-embedding cache — same content-hash strategy as the speaker
+        # cache: key by audio CONTENT, not file path, so per-segment Dynamic-mode
+        # slices that are actually the same audio reuse one embedding instead of
+        # recomputing feature extraction every segment.
+        _emo_path_mismatch = (self.cache_emo_cond is None or self.cache_emo_audio_prompt != emo_audio_prompt)
+        _emo_hash_match = False
+        if _emo_path_mismatch and self.cache_emo_audio_hash is not None:
+            try:
+                with open(emo_audio_prompt, 'rb') as _f:
+                    _new_emo_hash = hashlib.md5(_f.read()).hexdigest()
+                _emo_hash_match = (_new_emo_hash == self.cache_emo_audio_hash)
+            except Exception:
+                pass
+        if _emo_path_mismatch and not _emo_hash_match:
             if self.cache_emo_cond is not None:
                 self.cache_emo_cond = None
                 torch.cuda.empty_cache()
@@ -549,6 +584,11 @@ class IndexTTS2:
             # Cache emotion embedding with .detach() to prevent gradient graph accumulation
             self.cache_emo_cond = emo_cond_emb.detach()
             self.cache_emo_audio_prompt = emo_audio_prompt
+            try:
+                with open(emo_audio_prompt, 'rb') as _f:
+                    self.cache_emo_audio_hash = hashlib.md5(_f.read()).hexdigest()
+            except Exception:
+                self.cache_emo_audio_hash = None
         else:
             emo_cond_emb = self.cache_emo_cond
 
@@ -557,9 +597,12 @@ class IndexTTS2:
         segments = self.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens)
         segments_count = len(segments)
 
-        if use_speed and segments_count > 1:
-            print(f"  >> Warning: use_speed requested but text splits into {segments_count} segments; duration targeting only supports single-segment text. Falling back to Auto duration for this request.")
-            use_speed = False
+        # Per-internal-segment text-token counts — lets a whole-text target duration
+        # be distributed proportionally across internal GPT segments (s2mel-level
+        # duration targeting below works for multi-segment text, unlike the old
+        # GPT-level num_codes clamp which was disabled whenever segments_count > 1).
+        seg_text_lens = [len(self.tokenizer.convert_tokens_to_ids(sent)) for sent in segments]
+        total_text_tokens = max(1, sum(seg_text_lens))
 
         text_token_ids = self.tokenizer.convert_tokens_to_ids(text_tokens_list)
         if self.tokenizer.unk_token_id in text_token_ids:
@@ -640,20 +683,18 @@ class IndexTTS2:
                 print(f"Dynamic max_mel_tokens for this segment: {dynamic_max_mel_tokens} (Text tokens: {text_tokens.shape[1]})")
             # ---------------------------------
 
-            # --- DURATION CONTROL (native IndexTTS2 use_speed) ---
-            # When a target duration is requested, convert it to a target
-            # mel-token count (50 tokens/sec, a fixed model constant) and clamp
-            # it against the dynamic KV-cache cap so an unreasonable target
-            # can't overrun generation. Only reachable for single-segment text
-            # (see the segments_count guard above).
-            num_codes = None
+            # --- DURATION CONTROL (s2mel-level, OutofLipSync-style) ---
+            # Target duration is applied at the vocoder ylens (per-frame ratio)
+            # instead of clamping GPT generation. GPT runs at natural length, so
+            # long / multi-internal-segment texts are never truncated
+            # mid-sentence; the output is resynthesized to land inside the
+            # requested window. The whole-text target_dur is split across this
+            # text's internal GPT segments in proportion to their text tokens.
+            seg_target_dur = None
             if use_speed and target_dur is not None and target_dur > 0:
-                target_num_codes = max(1, int(target_dur * 50))
-                clamped_num_codes = min(target_num_codes, dynamic_max_mel_tokens)
-                num_codes = torch.tensor([clamped_num_codes], device=self.device)
-                if verbose:
-                    print(f"Duration control active: target {target_dur:.2f}s -> {clamped_num_codes} mel tokens (dynamic cap {dynamic_max_mel_tokens}).")
-            seg_use_speed = bool(use_speed and num_codes is not None)
+                seg_target_dur = float(target_dur) * (seg_text_lens[seg_idx] / total_text_tokens)
+            num_codes = None          # never clamp GPT
+            seg_use_speed = False     # GPT forward always natural
             # ------------------------------------------------------
 
             m_start_time = time.perf_counter()
@@ -679,7 +720,7 @@ class IndexTTS2:
                         emo_vec=emovec,
                         use_speed=seg_use_speed,
                         num_codes=num_codes,
-                        do_sample=True,
+                        do_sample=do_sample,
                         top_p=top_p,
                         top_k=top_k,
                         temperature=temperature,
@@ -745,7 +786,23 @@ class IndexTTS2:
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
                     S_infer = S_infer.transpose(1, 2)
                     S_infer = S_infer + latent
-                    target_lengths = (code_lens * 1.72).long()
+                    # Apply the s2mel-level duration ratio (OutofLipSync method):
+                    # estimate this segment's natural length from its mel-frame
+                    # count, then rescale ylens so the vocoder resynthesizes the
+                    # speech to land inside the target window. Fall back to the
+                    # natural length when no target was given.
+                    if seg_target_dur is not None and seg_target_dur > 0:
+                        _hop = self.cfg.s2mel['preprocess_params']['spect_params']['hop_length']
+                        _sr = self.cfg.s2mel['preprocess_params']['sr']
+                        _base_frames = code_lens.float() * 1.72
+                        _est_sec = (_base_frames * _hop).float() / float(_sr)
+                        if _est_sec > 1e-3:
+                            _ratio = seg_target_dur / _est_sec.item()
+                            target_lengths = (_base_frames * _ratio).clamp(min=1.0).long()
+                        else:
+                            target_lengths = (code_lens * 1.72).long()
+                    else:
+                        target_lengths = (code_lens * 1.72).long()
 
                     cond = self.s2mel.models['length_regulator'](S_infer,
                                                                  ylens=target_lengths,
