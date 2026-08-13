@@ -1957,11 +1957,16 @@ def _zrok_enable(token: str) -> bool:
 
     try:
         logger.info("[zrok] Enabling zrok with provided token ...")
-        r = subprocess.run([str(bin_path), "enable", token.strip()], capture_output=True, text=True, timeout=120)
-        if r.returncode == 0 and _zrok_enabled():
+        # --headless suppresses the TUI spinner, which otherwise poisons the
+        # exit code when stdout/stderr are piped (the spinner frames you see
+        # in the log are why the naive returncode check failed).
+        r = subprocess.run([str(bin_path), "enable", token.strip(), "--headless"],
+                           capture_output=True, text=True, timeout=120)
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if r.returncode == 0 or "successfully enabled" in out.lower() or _zrok_enabled():
             logger.info("[zrok] Enabled.")
             return True
-        logger.error(f"[zrok] enable failed: {(r.stderr or r.stdout or '').strip()}")
+        logger.error(f"[zrok] enable failed: {out}")
         return False
     except Exception as e:
         logger.error(f"[zrok] enable failed: {e}")
