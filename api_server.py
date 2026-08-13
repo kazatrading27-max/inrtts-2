@@ -49,6 +49,11 @@ import inspect
 import socket
 import re
 import argparse
+import shutil
+import tarfile
+import platform
+import urllib.request
+import urllib.error
 from typing import Optional, Literal, Any, Dict, List, Tuple
 from pathlib import Path
 
@@ -1853,6 +1858,215 @@ if my_rank == 0:
     webui_enhanced.demo.queue(20)
     app = gr.mount_gradio_app(app, webui_enhanced.demo, path="/")
 
+# ============== Public Tunnel (zrok v2 reserved name + cloudflared fallback) ==============
+# zrok v2 gives a PERMANENT https://<name>.shares.zrok.io URL via a reserved NAME
+# (created with `zrok2 create name`), unlike Cloudflare's quick tunnel which hands out a
+# random *.trycloudflare.com host that changes on every restart. All helpers are
+# NON-FATAL: any failure leaves the API serving on localhost untouched.
+#
+# zrok v2 command model (verified against zrok2 v2.0.4):
+#   zrok2 enable <token>                                     # one-time, writes ~/.zrok/environment.json
+#   zrok2 create name <name>                                 # reserve a subdomain (409 = already reserved)
+#   zrok2 share public <target> -n public:<name> --headless  # long-running forward
+
+_BIN_DIR = Path(__file__).resolve().parent / "bin"
+_ZROK_SUBDOMAIN = "shares.zrok.io"
+_ZROK_NAMESPACE = "public"  # free-tier namespace token -> *.shares.zrok.io
+_ZROK_PINNED_VERSION = "2.0.4"  # used only if the GitHub "latest" lookup fails
+
+
+def _zrok_exe_name() -> str:
+    return "zrok2.exe" if platform.system().lower() == "windows" else "zrok2"
+
+
+def _zrok_platform_tag() -> str:
+    """Return the zrok release asset OS/arch tag for this machine (e.g. linux_amd64)."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    os_tag = {"linux": "linux", "darwin": "darwin", "windows": "windows"}.get(system, system)
+    arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(machine, "amd64")
+    return f"{os_tag}_{arch}"
+
+
+def _zrok_binary() -> Optional[Path]:
+    """Locate an existing zrok2 binary (PATH or ./bin), without downloading."""
+    exe = _zrok_exe_name()
+    local = _BIN_DIR / exe
+    if local.exists() and os.access(local, os.X_OK):
+        return local
+    which = shutil.which("zrok2")
+    if which:
+        return Path(which)
+    return None
+
+
+def _ensure_zrok_binary() -> Optional[Path]:
+    """Return the zrok2 binary path, downloading + extracting on first use. Non-fatal."""
+    existing = _zrok_binary()
+    if existing:
+        return existing
+
+    tag = _zrok_platform_tag()
+    exe = _zrok_exe_name()
+    _BIN_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _BIN_DIR / exe
+
+    version = _ZROK_PINNED_VERSION
+    try:
+        with urllib.request.urlopen("https://api.github.com/repos/openziti/zrok/releases/latest", timeout=15) as resp:
+            tag_name = (json.loads(resp.read().decode("utf-8")).get("tag_name") or "").lstrip("v")
+            if tag_name:
+                version = tag_name
+    except Exception as e:
+        logger.warning(f"[zrok] Couldn't resolve latest release ({e}); using pinned {version}")
+
+    url = f"https://github.com/openziti/zrok/releases/download/v{version}/zrok_{version}_{tag}.tar.gz"
+    tarball = _BIN_DIR / f"zrok_{version}_{tag}.tar.gz"
+    try:
+        logger.info(f"[zrok] Downloading zrok v{version} ({tag}) ...")
+        urllib.request.urlretrieve(url, str(tarball))
+        with tarfile.open(tarball, "r:gz") as tf:
+            tf.extractall(_BIN_DIR)
+        os.chmod(dest, 0o755)
+        logger.info(f"[zrok] Installed zrok2 to {dest}")
+        return dest
+    except Exception as e:
+        logger.warning(f"[zrok] Failed to install zrok binary: {e}")
+        logger.warning("[zrok] Install manually: https://docs.zrok.io/docs/getting-started/ and re-run.")
+        return None
+
+
+def _zrok_enabled() -> bool:
+    return (Path.home() / ".zrok" / "environment.json").exists()
+
+
+def _zrok_enable(token: str) -> bool:
+    """One-time `zrok2 enable <token>`. Returns True if already enabled or enable succeeds."""
+    if _zrok_enabled():
+        return True
+    if not token or not token.strip():
+        logger.error(
+            "[zrok] Not enabled and no token provided. Get a token at https://myzrok.io "
+            "(or the zrok dashboard), then pass --zrok-token <TOKEN> or set ZROK_ENABLE_TOKEN."
+        )
+        return False
+
+    bin_path = _ensure_zrok_binary()
+    if not bin_path:
+        return False
+
+    try:
+        logger.info("[zrok] Enabling zrok with provided token ...")
+        r = subprocess.run([str(bin_path), "enable", token.strip()], capture_output=True, text=True, timeout=120)
+        if r.returncode == 0 and _zrok_enabled():
+            logger.info("[zrok] Enabled.")
+            return True
+        logger.error(f"[zrok] enable failed: {(r.stderr or r.stdout or '').strip()}")
+        return False
+    except Exception as e:
+        logger.error(f"[zrok] enable failed: {e}")
+        return False
+
+
+def _zrok_public_url(name: str) -> str:
+    return f"https://{name}.{_ZROK_SUBDOMAIN}"
+
+
+def _zrok_reserve(name: str, bin_path: Path) -> bool:
+    """Idempotent `zrok2 create name <name>`. True if reserved (or already was)."""
+    try:
+        r = subprocess.run(
+            [str(bin_path), "create", "name", name],
+            capture_output=True, text=True, timeout=120
+        )
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        # 409 createShareNameConflict = the name is already reserved on this account.
+        if r.returncode == 0 or "conflict" in out.lower() or "409" in out or "already" in out.lower():
+            logger.info(f"[zrok] Reserved name: {_zrok_public_url(name)}")
+            return True
+        logger.error(f"[zrok] create name failed: {out}")
+        if "taken" in out.lower() or "not unique" in out.lower():
+            logger.error(f"[zrok] Name '{name}' is already taken on {_ZROK_SUBDOMAIN} — pick another --share-name.")
+        return False
+    except Exception as e:
+        logger.error(f"[zrok] create name failed: {e}")
+        return False
+
+
+def _start_zrok_share(name: str, port: int, token: str) -> Optional[str]:
+    """Reserve + share a PERMANENT public URL via zrok.io. Non-fatal on any failure."""
+    if not name or not name.strip():
+        logger.error("[zrok] No share name provided (--share-name).")
+        return None
+    name = name.strip()
+
+    if not _zrok_enable(token):
+        return None
+
+    bin_path = _ensure_zrok_binary()
+    if not bin_path:
+        return None
+
+    local_url = f"http://localhost:{port}"
+
+    if not _zrok_reserve(name, bin_path):
+        return None
+
+    public_url = _zrok_public_url(name)
+    log_file = Path("logs") / "zrok-share.log"
+    try:
+        log_handle = open(log_file, "ab")
+        subprocess.Popen(
+            [str(bin_path), "share", "public", local_url,
+             "-n", f"{_ZROK_NAMESPACE}:{name}", "--headless", "--force-local"],
+            stdout=log_handle, stderr=subprocess.STDOUT
+        )
+    except Exception as e:
+        logger.error(f"[zrok] Failed to launch zrok share process: {e}")
+        return None
+
+    logger.info(f"[zrok] Permanent public share active: {public_url}")
+    return public_url
+
+
+def _start_cloudflared_tunnel(port: int) -> Optional[str]:
+    """Legacy fallback: Cloudflare quick tunnel (RANDOM *.trycloudflare.com URL)."""
+    cloudflared_path = "./cloudflared"
+    if not os.path.exists(cloudflared_path):
+        logger.info("Downloading cloudflared for public sharing...")
+        try:
+            subprocess.run(
+                ["wget", "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
+                 "-O", cloudflared_path], check=True, timeout=120)
+            subprocess.run(["chmod", "+x", cloudflared_path], check=True, timeout=60)
+        except Exception as e:
+            logger.error(f"Failed to download cloudflared: {e}")
+            return None
+
+    logger.info("Starting Cloudflare public tunnel...")
+    try:
+        tunnel_proc = subprocess.Popen(
+            [cloudflared_path, "tunnel", "--url", f"http://localhost:{port}"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        )
+    except Exception as e:
+        logger.error(f"Failed to start cloudflared: {e}")
+        return None
+
+    public_url = None
+    try:
+        for line in iter(tunnel_proc.stdout.readline, ''):
+            logger.info(f"[cloudflared] {line.strip()}")
+            match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
+            if match:
+                public_url = match.group(0)
+                break
+    except Exception as e:
+        logger.warning(f"Failed to read cloudflared output: {e}")
+
+    return public_url
+
+
 # ============== Main Program ==============
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="IndexTTS2 API Server")
@@ -1869,7 +2083,10 @@ if __name__ == "__main__":
     parser.add_argument("--cuda_kernel", action="store_true")
     parser.add_argument("--audiox_model", type=str, default=os.environ.get("AUDIOX_MODEL", "HKUSTAudio/AudioX-MAF"))
     parser.add_argument("--audiox_preload", action="store_true")
-    parser.add_argument("--share", action="store_true", help="Create a public Cloudflare tunnel to expose the API and WebUI")
+    parser.add_argument("--share", action="store_true", help="Expose the API and WebUI publicly (default backend: zrok reserved share)")
+    parser.add_argument("--share-name", type=str, default="dubstudio1", help="Reserved zrok subdomain name -> permanent https://<name>.shares.zrok.io")
+    parser.add_argument("--share-backend", type=str, choices=["zrok", "cloudflared"], default="zrok", help="Public tunnel backend: zrok (permanent reserved URL) or cloudflared (random quick tunnel)")
+    parser.add_argument("--zrok-token", type=str, default=os.environ.get("ZROK_ENABLE_TOKEN", ""), help="One-time zrok enable token (or set ZROK_ENABLE_TOKEN env var)")
 
     args = parser.parse_args()
     args.max_concurrency, args.queue_size, args.queue_timeout = max(1, args.max_concurrency), max(0, args.queue_size), max(0.1, args.queue_timeout)
@@ -1877,28 +2094,10 @@ if __name__ == "__main__":
 
     if my_rank == 0:
         if args.share:
-            cloudflared_path = "./cloudflared"
-            if not os.path.exists(cloudflared_path):
-                logger.info("Downloading cloudflared for public sharing...")
-                subprocess.run(["wget", "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64", "-O", cloudflared_path], check=True)
-                subprocess.run(["chmod", "+x", cloudflared_path], check=True)
-
-            logger.info("Starting Cloudflare public tunnel...")
-            tunnel_proc = subprocess.Popen(
-                [cloudflared_path, "tunnel", "--url", f"http://localhost:{args.port}"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-            )
-
-            public_url = None
-            try:
-                for line in iter(tunnel_proc.stdout.readline, ''):
-                    logger.info(f"[cloudflared] {line.strip()}")
-                    match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
-                    if match:
-                        public_url = match.group(0)
-                        break
-            except Exception as e:
-                logger.warning(f"Failed to read cloudflared output: {e}")
+            if args.share_backend == "cloudflared":
+                public_url = _start_cloudflared_tunnel(args.port)
+            else:
+                public_url = _start_zrok_share(args.share_name, args.port, args.zrok_token)
 
             if public_url:
                 logger.info("=" * 70)
@@ -1906,7 +2105,7 @@ if __name__ == "__main__":
                 logger.info(f"API Docs available at: {public_url}/docs")
                 logger.info("=" * 70)
             else:
-                logger.warning("Cloudflare tunnel started, but couldn't extract the public URL. Check logs above.")
+                logger.warning("Public tunnel failed to start. API remains available on localhost.")
 
         logger.info(f"IndexTTS2 Master API Server - http://{args.host}:{args.port}")
         logger.info(f"Data-parallel world: {my_world_size} node(s), peers: {_worker_ips}")
