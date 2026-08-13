@@ -2088,9 +2088,9 @@ if __name__ == "__main__":
     parser.add_argument("--cuda_kernel", action="store_true")
     parser.add_argument("--audiox_model", type=str, default=os.environ.get("AUDIOX_MODEL", "HKUSTAudio/AudioX-MAF"))
     parser.add_argument("--audiox_preload", action="store_true")
-    parser.add_argument("--share", action="store_true", help="Expose the API and WebUI publicly (default backend: zrok reserved share)")
+    parser.add_argument("--share", action="store_true", help="Expose the API and WebUI publicly (default backend: cloudflared quick tunnel — tolerant of long generations)")
     parser.add_argument("--share-name", type=str, default="dubstudio1", help="Reserved zrok subdomain name -> permanent https://<name>.shares.zrok.io")
-    parser.add_argument("--share-backend", type=str, choices=["zrok", "cloudflared"], default="zrok", help="Public tunnel backend: zrok (permanent reserved URL) or cloudflared (random quick tunnel)")
+    parser.add_argument("--share-backend", type=str, choices=["zrok", "cloudflared"], default="cloudflared", help="Public tunnel backend: cloudflared (random quick tunnel, ~100s timeout) or zrok (permanent reserved URL, ~30s timeout — 504s long generations)")
     parser.add_argument("--zrok-token", type=str, default=os.environ.get("ZROK_ENABLE_TOKEN", ""), help="One-time zrok enable token (or set ZROK_ENABLE_TOKEN env var)")
 
     args = parser.parse_args()
@@ -2101,8 +2101,14 @@ if __name__ == "__main__":
         if args.share:
             if args.share_backend == "cloudflared":
                 public_url = _start_cloudflared_tunnel(args.port)
+                if not public_url:
+                    logger.warning("Cloudflare quick tunnel failed to start; falling back to zrok.")
+                    public_url = _start_zrok_share(args.share_name, args.port, args.zrok_token)
             else:
                 public_url = _start_zrok_share(args.share_name, args.port, args.zrok_token)
+                if not public_url:
+                    logger.warning("zrok share failed to start; falling back to Cloudflare quick tunnel.")
+                    public_url = _start_cloudflared_tunnel(args.port)
 
             if public_url:
                 logger.info("=" * 70)
