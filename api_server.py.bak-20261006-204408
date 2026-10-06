@@ -1321,15 +1321,8 @@ async def _synth_segment(text: str, voice_label: str, spk_path: str, params: dic
         logger.warning(f"[dub] worker {pool_index} failed ({type(e).__name__}: {e}) - segment served locally")
         return await _local()
 
-def _assemble_dub(clips: List[Tuple[dict, np.ndarray]], sr: int, interval_silence_ms: int, reset_timeline: bool) -> Tuple[np.ndarray, int]:
-    """Place every clip on the SRT timeline (silence padding) or back-to-back.
-
-    Returns ``(mixed_audio, truncated_clip_count)``. ``truncated_clip_count`` is
-    the number of clips that overran their subtitle slot and had their tail cut.
-    The caller surfaces it as the ``X-Dub-Truncated`` response header so clients
-    can detect clipped speech programmatically instead of only finding it in the
-    server log.
-    """
+def _assemble_dub(clips: List[Tuple[dict, np.ndarray]], sr: int, interval_silence_ms: int, reset_timeline: bool) -> np.ndarray:
+    """Place every clip on the SRT timeline (silence padding) or back-to-back."""
     gap = int(sr * max(0, interval_silence_ms) / 1000)
     stamps_complete = all(seg.get("start_ms") is not None and seg.get("end_ms") is not None for seg, _ in clips)
     if reset_timeline or not stamps_complete:
@@ -1337,8 +1330,7 @@ def _assemble_dub(clips: List[Tuple[dict, np.ndarray]], sr: int, interval_silenc
         for i, (_, wav) in enumerate(clips):
             if i: pieces.append(np.zeros(gap, dtype=np.int16))
             pieces.append(wav)
-        mixed = np.ascontiguousarray(np.concatenate(pieces)) if pieces else np.zeros(0, dtype=np.int16)
-        return mixed, 0   # back-to-back layout has no per-segment slot to overrun
+        return np.ascontiguousarray(np.concatenate(pieces)) if pieces else np.zeros(0, dtype=np.int16)
 
     tail_ms = 800
     timeline_end_ms = max((seg.get("end_ms") or 0) for seg, _ in clips) + tail_ms
@@ -1355,7 +1347,7 @@ def _assemble_dub(clips: List[Tuple[dict, np.ndarray]], sr: int, interval_silenc
             buf[s:s + len(wav)] = wav
     if truncated:
         logger.warning(f"[dub] {truncated} segment(s) overran their subtitle slot and were truncated")
-    return buf, truncated
+    return buf
 
 # ---- async dub jobs (a full SRT can take minutes; Cloudflare's quick tunnel kills
 # any sync response that needs >~100s to produce its FIRST byte, so long batches
@@ -1441,8 +1433,8 @@ async def _run_dub_batch(request: DubRequest, job: Optional[dict] = None) -> Tup
         raise DubError(f"{len(failed)} segment(s) failed; indexes: {[f[0] for f in failed]}")
     clips = [(segments[i], results[i]) for i in range(len(results))]
 
-    mixed, truncated_clips = _assemble_dub(clips, DUB_SAMPLE_RATE, int(params.get("interval_silence", 200)),
-                                           bool(data.get("reset_timeline", False)))
+    mixed = _assemble_dub(clips, DUB_SAMPLE_RATE, int(params.get("interval_silence", 200)),
+                          bool(data.get("reset_timeline", False)))
     audio_bytes, media_type = _encode_audio(mixed, DUB_SAMPLE_RATE, data_fmt)
     total = time.perf_counter() - t0
     logger.info(f"[dub] done: {len(clips)} segments -> {len(mixed)/DUB_SAMPLE_RATE:.1f}s audio in {total:.1f}s "
@@ -1454,7 +1446,6 @@ async def _run_dub_batch(request: DubRequest, job: Optional[dict] = None) -> Tup
         "X-IndexTTS-Ranks": ",".join(str(x) for x in sorted(used_pool)),
         "X-IndexTTS-Total-Time": f"{total:.3f}",
         "X-IndexTTS-Output-Format": data_fmt,
-        "X-Dub-Truncated": str(truncated_clips),
     }
 
 async def _dub_local(request: DubRequest) -> Response | JSONResponse:
@@ -1592,7 +1583,7 @@ async function poll(id){
   if(j.status==="done"){
    const url="/v1/dub/jobs/"+id+"/result";
    $("out").style.display="block";$("aud").src=url;$("dl").href=url;
-   const m=j.meta||{};st.innerHTML='<span class="ok">done</span> — '+(j.completed||0)+' segments · GPUs ['+(m["X-IndexTTS-Ranks"]||"-")+'] · '+(m["X-Dub-Duration"]||"?")+'s audio'+((+m["X-Dub-Truncated"]>0)?' · <span class="err">⚠ '+(+m["X-Dub-Truncated"])+' clip(s) truncated</span>':'');
+   const m=j.meta||{};st.innerHTML='<span class="ok">done</span> — '+(j.completed||0)+' segments · GPUs ['+(m["X-IndexTTS-Ranks"]||"-")+'] · '+(m["X-Dub-Duration"]||"?")+'s audio';
    $("go").disabled=false;return;
   }
   if(j.status==="error"){st.innerHTML='<span class="err">error: '+(j.error||"unknown")+'</span>';$("go").disabled=false;return;}
