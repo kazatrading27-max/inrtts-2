@@ -488,7 +488,7 @@ def _rms_trim_edges(y: np.ndarray, sr: int, rms_threshold: float = 0.005, window
     start_pos, end_pos = max(0, start_pos - margin_samples), min(len(y), end_pos + margin_samples)
     return y[start_pos:end_pos] if end_pos > start_pos else y
 
-def _remove_trailing_noise(y: np.ndarray, sr: int, min_gap_ms: int = 200, max_trailing_ms: int = 500, energy_ratio: float = 0.3, rms_threshold: float = 0.005) -> np.ndarray:
+def _remove_trailing_noise(y: np.ndarray, sr: int, min_gap_ms: int = 200, max_trailing_ms: int = 3000, energy_ratio: float = 0.3, rms_threshold: float = 0.005) -> np.ndarray:
     if len(y) < int(sr * 0.3): return y
     regions = _detect_silence_regions(y, sr, rms_threshold=rms_threshold)
     if not regions: return y
@@ -496,7 +496,16 @@ def _remove_trailing_noise(y: np.ndarray, sr: int, min_gap_ms: int = 200, max_tr
     last_gap = next(((s, e) for s, e in reversed(regions) if (e - s) >= min_gap_samples), None)
     if not last_gap: return y
     gap_start, gap_end = last_gap
-    if gap_end >= len(y): return y
+    if gap_end >= len(y) - int(sr * 0.05):
+        # FIX 2026-11-25: a trailing silence that runs to EOF is exactly the
+        # case that must be trimmed; the original code returned y unchanged,
+        # which is why the generated tails were never removed.
+        fade_s = min(int(sr * 0.02), gap_start)
+        result = y[:gap_start].copy()
+        if fade_s > 0:
+            fade = np.linspace(1.0, 0.0, fade_s).astype(result.dtype)
+            result[-fade_s:] *= fade
+        return result
     trailing = y[gap_end:]
     trailing_len = len(trailing)
 
@@ -963,6 +972,17 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Model initialization failed: {e}")
         tts = None
 
+    # --- stable_emotion: collapse each emotion's anchor group to its unit-mean
+    # (removes the 4.63x within-group anchor-norm swing that made voice/emotion
+    # drift between segments, worst on short/emotional references).
+    if tts is not None and not getattr(tts, '_stable_emotion_applied', False):
+        try:
+            import stable_emotion
+            stable_emotion.install(tts)
+            tts._stable_emotion_applied = True
+            logger.info('stable_emotion: anchor groups collapsed to means')
+        except Exception as e:
+            logger.warning(f'stable_emotion not applied: {e}')
     if tts is not None and hasattr(tts, 'gpt') and hasattr(tts.gpt, 'inference_model') and hasattr(tts.gpt.inference_model, 'generate'):
         _orig_generate = tts.gpt.inference_model.generate
         if not getattr(_orig_generate, "_api_kwarg_filtered", False):
