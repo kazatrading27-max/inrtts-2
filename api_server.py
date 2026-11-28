@@ -504,7 +504,7 @@ def _rms_trim_edges(y: np.ndarray, sr: int, rms_threshold: float = 0.005, window
     start_pos, end_pos = max(0, start_pos - margin_samples), min(len(y), end_pos + margin_samples)
     return y[start_pos:end_pos] if end_pos > start_pos else y
 
-def _remove_trailing_noise(y: np.ndarray, sr: int, min_gap_ms: int = 200, max_trailing_ms: int = 3000, energy_ratio: float = 0.178, rms_threshold: float = 0.005) -> np.ndarray:
+def _remove_trailing_noise(y: np.ndarray, sr: int, min_gap_ms: int = 200, max_trailing_ms: int = 3000, energy_ratio: float = 0.3, rms_threshold: float = 0.005) -> np.ndarray:
     if len(y) < int(sr * 0.3): return y
     regions = _detect_silence_regions(y, sr, rms_threshold=rms_threshold)
     if not regions: return y
@@ -536,8 +536,9 @@ def _remove_trailing_noise(y: np.ndarray, sr: int, min_gap_ms: int = 200, max_tr
         if len(main_speech) > 0:
             main_rms = float(np.sqrt(np.mean(main_speech.astype(np.float64) ** 2)))
             trail_rms = float(np.sqrt(np.mean(trailing.astype(np.float64) ** 2)))
-            # 0.178 = -15 dB (was 0.3): at 0.3 this cut 0.6 s of quiet content
-            # from seg02 that the ear-approved trim keeps (measured 2026-11-28).
+            # 0.3 (-10.5 dB) is the shipped value the user's good dubs ran with;
+            # 0.178 kept ~4.7 s of extra trailing junk across 80 real takes
+            # (production regression 2026-11-28). Do not tighten without an ear check.
             if main_rms > 0 and (trail_rms / main_rms) < energy_ratio: return _cut()
     return y
 
@@ -1000,22 +1001,15 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f'stable_emotion not applied: {e}')
 
-    # --- ref_prep: register-check every reference BEFORE it conditions the model.
-    # A reference's pitch sets the output register: one measured at 408-433 Hz
-    # produced near-silence, and the same clip retuned to ~200 Hz synthesised
-    # normally. The model's own preprocessing (infer_v2._load_and_cut_audio) trims
-    # silence and normalises loudness to -23 dBFS but never touches pitch. This
-    # wraps that function: out-of-band references are retuned toward 200 Hz with
-    # duration preserved, and anything inside 80-330 Hz passes through byte-identical
-    # (so every already-approved voice is untouched). See ref_prep.py for the
-    # environment switches (INDEXTTS_REF_F0_NORM=dry to log-only, =0 to disable).
-    if tts is not None and not getattr(tts, '_ref_prep_applied', False):
-        try:
-            import ref_prep
-            ref_prep.install(tts)
-            tts._ref_prep_applied = True
-        except Exception as e:
-            logger.warning(f'ref_prep not applied: {e}')
+    # ref_prep (register normalisation) is DISABLED here: it also retunes the
+    # app's short per-line EMOTION clips (INDEXTTS_REF_F0_EMO defaults on), and
+    # the emotion prompt is not register-neutral — a male character's expressive
+    # slice shifted toward 200 Hz dragged delivered output female-ward and cost
+    # speaker similarity (production regression 2026-11-28, measured on 80 real
+    # takes). The voice composites measured in-band (104-171 Hz) and pass
+    # through anyway; register is handled app-side (register guard + re-pitch
+    # rescue). ref_prep.py stays in the repo; enable manually if ever needed:
+    #   import ref_prep; ref_prep.install(tts)   # env INDEXTTS_REF_F0_NORM=dry first
 
     if tts is not None and hasattr(tts, 'gpt') and hasattr(tts.gpt, 'inference_model') and hasattr(tts.gpt.inference_model, 'generate'):
         _orig_generate = tts.gpt.inference_model.generate
