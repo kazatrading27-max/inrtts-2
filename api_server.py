@@ -454,6 +454,22 @@ def _is_deepspeed_enabled() -> bool:
 
 # ============== Audio Trimming Logic ==============
 
+def _fade_out_cosine(y: np.ndarray, sr: int, ms: int = 60) -> np.ndarray:
+    """Short cosine decay on the last `ms`; removes the click of an abrupt stop.
+
+    Measured: high-emotion lines stop at 10-22 % of peak mid-waveform
+    (TAIL_FIX_FINDINGS, defect A). Non-destructive: duration never changes.
+    """
+    n = int(sr * ms / 1000)
+    if n <= 1 or len(y) <= n: return y
+    out = y.copy()
+    win = np.hanning(2 * n)[n:]
+    if out.dtype == np.int16:
+        out[-n:] = np.clip(out[-n:].astype(np.float64) * win, -32768, 32767).astype(np.int16)
+    else:
+        out[-n:] = out[-n:].astype(np.float32) * win.astype(np.float32)
+    return out
+
 def _detect_silence_regions(y: np.ndarray, sr: int, window_ms: int = 25, rms_threshold: float = 0.005) -> List[Tuple[int, int]]:
     window_samples = max(1, int(sr * window_ms / 1000))
     step = max(1, window_samples // 2)
@@ -488,7 +504,7 @@ def _rms_trim_edges(y: np.ndarray, sr: int, rms_threshold: float = 0.005, window
     start_pos, end_pos = max(0, start_pos - margin_samples), min(len(y), end_pos + margin_samples)
     return y[start_pos:end_pos] if end_pos > start_pos else y
 
-def _remove_trailing_noise(y: np.ndarray, sr: int, min_gap_ms: int = 200, max_trailing_ms: int = 3000, energy_ratio: float = 0.3, rms_threshold: float = 0.005) -> np.ndarray:
+def _remove_trailing_noise(y: np.ndarray, sr: int, min_gap_ms: int = 200, max_trailing_ms: int = 3000, energy_ratio: float = 0.178, rms_threshold: float = 0.005) -> np.ndarray:
     if len(y) < int(sr * 0.3): return y
     regions = _detect_silence_regions(y, sr, rms_threshold=rms_threshold)
     if not regions: return y
@@ -496,26 +512,23 @@ def _remove_trailing_noise(y: np.ndarray, sr: int, min_gap_ms: int = 200, max_tr
     last_gap = next(((s, e) for s, e in reversed(regions) if (e - s) >= min_gap_samples), None)
     if not last_gap: return y
     gap_start, gap_end = last_gap
-    if gap_end >= len(y) - int(sr * 0.05):
-        # FIX 2026-11-25: a trailing silence that runs to EOF is exactly the
-        # case that must be trimmed; the original code returned y unchanged,
-        # which is why the generated tails were never removed.
-        fade_s = min(int(sr * 0.02), gap_start)
-        result = y[:gap_start].copy()
-        if fade_s > 0:
-            fade = np.linspace(1.0, 0.0, fade_s).astype(result.dtype)
-            result[-fade_s:] *= fade
-        return result
-    trailing = y[gap_end:]
-    trailing_len = len(trailing)
 
     def _cut() -> np.ndarray:
+        if gap_start < int(sr * 0.05): return y
         fade_s = min(int(sr * 0.02), gap_start)
         result = y[:gap_start].copy()
         if fade_s > 0:
             fade = np.linspace(1.0, 0.0, fade_s).astype(result.dtype)
             result[-fade_s:] *= fade
         return result
+
+    # FIX 2026-11-25: a trailing silence that runs to EOF is exactly the case
+    # that must be trimmed; the original code returned y unchanged, which is
+    # why the generated tails were never removed. 50 ms of slack covers the
+    # last analysis window, which can stop short of the true end.
+    if gap_end >= len(y) - int(sr * 0.05): return _cut()
+    trailing = y[gap_end:]
+    trailing_len = len(trailing)
 
     if trailing_len < very_short_samples: return _cut()
     if trailing_len < max_trailing_samples:
@@ -523,6 +536,8 @@ def _remove_trailing_noise(y: np.ndarray, sr: int, min_gap_ms: int = 200, max_tr
         if len(main_speech) > 0:
             main_rms = float(np.sqrt(np.mean(main_speech.astype(np.float64) ** 2)))
             trail_rms = float(np.sqrt(np.mean(trailing.astype(np.float64) ** 2)))
+            # 0.178 = -15 dB (was 0.3): at 0.3 this cut 0.6 s of quiet content
+            # from seg02 that the ear-approved trim keeps (measured 2026-11-28).
             if main_rms > 0 and (trail_rms / main_rms) < energy_ratio: return _cut()
     return y
 
@@ -553,6 +568,7 @@ def trim_audio_array(y: np.ndarray, sr: int, top_db: int = 30, margin_ms: int = 
     yt = _rms_trim_edges(yt, sr, margin_ms=margin_ms)
     yt = _remove_trailing_noise(yt, sr)
     yt = _compress_internal_silence(yt, sr, max_silence_ms=max_internal_silence_ms, compress_to_ms=compress_silence_to_ms)
+    yt = _fade_out_cosine(yt, sr)
     trimmed_duration = len(yt) / sr
     if len(yt) > int(sr * 0.1):
         removed = original_duration - trimmed_duration
@@ -983,6 +999,24 @@ async def lifespan(app: FastAPI):
             logger.info('stable_emotion: anchor groups collapsed to means')
         except Exception as e:
             logger.warning(f'stable_emotion not applied: {e}')
+
+    # --- ref_prep: register-check every reference BEFORE it conditions the model.
+    # A reference's pitch sets the output register: one measured at 408-433 Hz
+    # produced near-silence, and the same clip retuned to ~200 Hz synthesised
+    # normally. The model's own preprocessing (infer_v2._load_and_cut_audio) trims
+    # silence and normalises loudness to -23 dBFS but never touches pitch. This
+    # wraps that function: out-of-band references are retuned toward 200 Hz with
+    # duration preserved, and anything inside 80-330 Hz passes through byte-identical
+    # (so every already-approved voice is untouched). See ref_prep.py for the
+    # environment switches (INDEXTTS_REF_F0_NORM=dry to log-only, =0 to disable).
+    if tts is not None and not getattr(tts, '_ref_prep_applied', False):
+        try:
+            import ref_prep
+            ref_prep.install(tts)
+            tts._ref_prep_applied = True
+        except Exception as e:
+            logger.warning(f'ref_prep not applied: {e}')
+
     if tts is not None and hasattr(tts, 'gpt') and hasattr(tts.gpt, 'inference_model') and hasattr(tts.gpt.inference_model, 'generate'):
         _orig_generate = tts.gpt.inference_model.generate
         if not getattr(_orig_generate, "_api_kwarg_filtered", False):
@@ -1233,7 +1267,9 @@ async def _forward_or_local(request: BaseModel, path: str, local_coro) -> Respon
     logger.info(f"Forwarding API request to Rank {chosen} ({url})")
     try:
         resp = await _http.post(url, json=request.model_dump(exclude_none=True))
-        headers = {k: v for k, v in resp.headers.items() if k.startswith("X-")}
+        # httpx lowercases header names; a case-sensitive "X-" test dropped every
+        # X-IndexTTS-* timing header on responses served by a worker.
+        headers = {k: v for k, v in resp.headers.items() if k.lower().startswith("x-")}
         return Response(content=resp.content,
                         status_code=resp.status_code,
                         media_type=resp.headers.get("content-type") or "application/octet-stream",
@@ -1312,9 +1348,14 @@ class DubRequest(BaseModel):
     wait: bool = Field(True, description="true = synchronous single response; false = returns a job_id immediately (recommended for batches: immune to the ~100s Cloudflare first-byte budget).")
     # plus any SpeechParams fields (emotion, presets, sampling…) — passed through to every segment
 
-async def _synth_segment(text: str, voice_label: str, spk_path: str, params: dict, pool_index: int) -> Tuple[int, np.ndarray]:
+async def _synth_segment(text: str, voice_label: str, spk_path: str, params: dict, pool_index: int) -> Tuple[int, np.ndarray, int]:
     """Synthesize one dub segment on a specific pool node (0 = local GPU, >0 = worker).
-    Falls back to the local GPU on any transport/worker error. Returns (sample_rate, int16 mono wav)."""
+
+    Returns ``(sample_rate, int16 mono wav, ran_on)`` where ``ran_on`` is the node
+    that ACTUALLY produced the audio (0 when a worker failed and the fallback ran
+    locally). A worker gets one retry before quarantine so a single transport blip
+    does not silently move the whole batch onto one GPU.
+    """
     async def _local() -> Tuple[int, np.ndarray]:
         rec = await _guarded_infer(text, spk_path, _unique_output_path("dub_"), params)
         if rec["result"] is None:
@@ -1322,24 +1363,39 @@ async def _synth_segment(text: str, voice_label: str, spk_path: str, params: dic
         return rec["result"]
 
     if pool_index == 0 or _http is None:
-        return await _local()
+        sr, wav = await _local()
+        return sr, wav, 0
 
     ip = _worker_ips[pool_index]
     port = _worker_ports[pool_index - 1] if (pool_index - 1) < len(_worker_ports) else 8003
     url = f"http://{ip}:{port}/v1/audio/speech"
     payload = {"input": text, "model": "indextts2", "voice": voice_label,
                "spk_audio_prompt": spk_path, "response_format": "wav", "trim_silence": False, **params}
-    try:
+
+    async def _attempt() -> Tuple[int, np.ndarray]:
         resp = await _http.post(url, json=payload)
         if resp.status_code != 200:
-            raise RuntimeError(f"worker {pool_index} HTTP {resp.status_code}: {resp.text[:120]}")
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
         wav, sr = sf.read(io.BytesIO(resp.content), dtype="int16")
         if wav.ndim > 1: wav = wav[:, 0]
         return int(sr), wav
-    except Exception as e:
-        worker_ready[ip] = False   # quarantine; the health ticker will re-admit it
-        logger.warning(f"[dub] worker {pool_index} failed ({type(e).__name__}: {e}) - segment served locally")
-        return await _local()
+
+    last_err = None
+    for attempt in (1, 2):
+        try:
+            sr, wav = await _attempt()
+            return sr, wav, pool_index
+        except Exception as e:
+            last_err = e
+            logger.error(f"[dub] worker {pool_index} ({ip}:{port}) attempt {attempt}/2 failed: "
+                         f"{type(e).__name__}: {e}")
+            if attempt == 1:
+                await asyncio.sleep(0.5)
+    worker_ready[ip] = False   # quarantine; the health ticker will re-admit it
+    logger.error(f"[dub] worker {pool_index} ({ip}) quarantined after 2 failures "
+                 f"({type(last_err).__name__}) - segment served locally")
+    sr, wav = await _local()
+    return sr, wav, 0
 
 def _assemble_dub(clips: List[Tuple[dict, np.ndarray]], sr: int, interval_silence_ms: int, reset_timeline: bool) -> Tuple[np.ndarray, int]:
     """Place every clip on the SRT timeline (silence padding) or back-to-back.
@@ -1356,7 +1412,7 @@ def _assemble_dub(clips: List[Tuple[dict, np.ndarray]], sr: int, interval_silenc
         pieces = []
         for i, (_, wav) in enumerate(clips):
             if i: pieces.append(np.zeros(gap, dtype=np.int16))
-            pieces.append(wav)
+            pieces.append(_fade_out_cosine(wav, sr))
         mixed = np.ascontiguousarray(np.concatenate(pieces)) if pieces else np.zeros(0, dtype=np.int16)
         return mixed, 0   # back-to-back layout has no per-segment slot to overrun
 
@@ -1370,7 +1426,10 @@ def _assemble_dub(clips: List[Tuple[dict, np.ndarray]], sr: int, interval_silenc
         slot = int(sr * max(0, next_start) / 1000) - s
         if len(wav) > slot:
             truncated += 1
-            wav = wav[:slot]
+            # A hard slice at the slot boundary clicks; fade the cut itself.
+            wav = _fade_out_cosine(wav[:slot], sr)
+        else:
+            wav = _fade_out_cosine(wav, sr)
         if slot > 0:
             buf[s:s + len(wav)] = wav
     if truncated:
@@ -1437,16 +1496,18 @@ async def _run_dub_batch(request: DubRequest, job: Optional[dict] = None) -> Tup
     pool = _forward_pool() if (my_rank == 0 and len(_worker_ips) > 1) else [0]
     fanout = DUB_FANOUT if DUB_FANOUT > 0 else max(1, len(pool))
     slots = asyncio.Semaphore(fanout)
-    used_pool: set = set()
+    used_pool: set = set()      # nodes that ACTUALLY produced audio
+    assigned_pool: set = set()  # nodes the dispatcher targeted
     logger.info(f"[dub] dispatching {len(segments)} segments | ready GPUs: {len(pool)} | fan-out: {fanout}")
 
     async def work(i: int, seg: dict):
         async with slots:
             target = pool[i % len(pool)]
-            used_pool.add(target)
+            assigned_pool.add(target)
             v_label = seg.get("voice") or voice_label
             v_path = _resolve_speaker({"voice": seg.get("voice")}) if seg.get("voice") else spk_path
-            sr, wav = await _synth_segment(seg["text"], v_label, v_path or spk_path, dict(params), target)
+            sr, wav, ran_on = await _synth_segment(seg["text"], v_label, v_path or spk_path, dict(params), target)
+            used_pool.add(ran_on)
             if sr != DUB_SAMPLE_RATE:
                 wav = np.clip(librosa.resample(wav.astype(np.float32) / 32768.0,
                                                orig_sr=sr, target_sr=DUB_SAMPLE_RATE) * 32767.0,
@@ -1466,12 +1527,15 @@ async def _run_dub_batch(request: DubRequest, job: Optional[dict] = None) -> Tup
     audio_bytes, media_type = _encode_audio(mixed, DUB_SAMPLE_RATE, data_fmt)
     total = time.perf_counter() - t0
     logger.info(f"[dub] done: {len(clips)} segments -> {len(mixed)/DUB_SAMPLE_RATE:.1f}s audio in {total:.1f}s "
-                f"across pool {sorted(used_pool)}")
+                f"| assigned {sorted(assigned_pool)} | executed {sorted(used_pool)}")
     return audio_bytes, media_type, {
         "X-Dub-Segments": str(len(clips)),
         "X-Dub-Duration": f"{len(mixed)/DUB_SAMPLE_RATE:.3f}",
         "X-Dub-Fanout": str(fanout),
+        # Ranks now reports EXECUTION (where audio was produced); assignment is
+        # separate so a worker fallback is visible instead of hidden.
         "X-IndexTTS-Ranks": ",".join(str(x) for x in sorted(used_pool)),
+        "X-Dub-Assigned": ",".join(str(x) for x in sorted(assigned_pool)),
         "X-IndexTTS-Total-Time": f"{total:.3f}",
         "X-IndexTTS-Output-Format": data_fmt,
         "X-Dub-Truncated": str(truncated_clips),
